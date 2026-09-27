@@ -1,0 +1,137 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">RoutePilot</string>
+    <string name="splash_tagline">सुरक्षित सड़कें • स्मार्ट यात्राएं</string>
+    <string name="splash_subtitle">IoT-आधारित सड़क और पुल खतरा पहचान प्रणाली</string>
+
+    <!-- Login & Auth -->
+    <string name="tab_driver_login">ड्राइवर लॉगिन</string>
+    <string name="tab_guest">अतिथि (Guest)</string>
+    <string name="label_email">ईमेल</string>
+    <string name="label_password">पासवर्ड</string>
+    <string name="label_remember_me">मुझे याद रखें</string>
+    <string name="action_forgot_password">पासवर्ड भूल गए?</string>
+    <string name="action_login">लॉगिन करें</string>
+    <string name="label_or">या</string>
+    <string name="action_continue_google">Google के साथ जारी रखें</string>
+    <string name="prompt_no_account">क्या आपका खाता नहीं है?</string>
+    <string name="action_sign_up">साइन अप करें</string>
+    <string name="action_continue_guest">अतिथि के रूप में जारी रखें</string>
+    <string name="guest_mode_description">बिना स्थायी खाता बनाए लाइव नेविगेशन, सड़क और पुल के खतरों की चेतावनी और सुरक्षित मार्ग की सुविधा प्राप्त करें।</string>
+    <string name="error_invalid_credentials">कृपया मान्य ईमेल और पासवर्ड दर्ज करें (न्यूनतम 6 अक्षर)।</string>
+    <string name="error_auth_failed">प्रमाणीकरण विफल रहा। कृपया पुनः प्रयास करें या अतिथि मोड चुनें।</string>
+
+    <!-- Modes -->
+    <string name="mode_live">लाइव मोड</string>
+    <string name="mode_demo">डेमो मोड</string>
+    <string name="mode_live_desc">वास्तविक GPS • वास्तविक बैकएंड • लाइव खतरे</string>
+    <string name="mode_demo_desc">नियंत्रित प्रदर्शन मोड (Demo Mode)</string>
+
+    <!-- Home Screen -->
+    <string name="search_placeholder_home">आप कहाँ जाना चाहते हैं?</string>
+    <string name="quick_dest_home">घर</string>
+    <string name="quick_dest_work">कार्यस्थल</string>
+    <string name="quick_dest_hospital">अस्पताल</string>
+    <string name="section_recent_destinations">हाल के गंतव्य</string>
+    <string name="action_see_all">सभी देखें</string>
+    <string name="nav_navigate">नेविगेट</string>
+    <string name="nav_history">इतिहास</string>
+    <string name="nav_settings">सेटिंग्स</string>
+    <string name="nav_profile">प्रोफ़ाइल</string>
+    <string name="active_hazards_banner_count">%1$d सक्रिय सड़क/पुल खतरे निगरानी में हैं</string>
+    <string name="no_active_hazards_banner">सभी निगरानी वाले पुल और मार्ग सुरक्षित हैं</string>
+
+    <!-- Select Destination Screen -->
+    <string name="title_select_destination">गंतव्य चुनें</string>
+    <string name="search_placeholder_destination">यहाँ स्थान खोजें</string>
+    <string name="label_selected_location">चयनित स्थान</string>
+    <string name="action_confirm_destination">गंतव्य की पुष्टि करें</string>
+    <string name="hint_tap_map_or_search">ऊपर कोई भी स्थान खोजें या गंतव्य चुनने के लिए सीधे मानचित्र पर टैप करें।</string>
+
+    <!-- Route Preview Screen -->
+    <string name="title_route_preview">मार्ग पूर्वावलोकन</string>
+    <string name="label_your_location">आपका स्थान</string>
+    <string name="label_current_location">वर्तमान स्थान</string>
+    <string name="label_recommended_route">अनुशंसित मार्ग</string>
+    <string name="label_alternate_route">वैकल्पिक मार्ग</string>
+    <string name="label_distance">दूरी</string>
+    <string name="label_estimated_time">अनुमानित समय</string>
+    <string name="label_road_condition">सड़क की स्थिति</string>
+    <string name="condition_mostly_good">अधिकांशतः अच्छी</string>
+    <string name="condition_good">अच्छी</string>
+    <string name="condition_caution">सावधानी — खतरा टाला गया</string>
+    <string name="condition_warning">मध्यम यातायात / चेतावनी</string>
+    <string name="action_start_driving">ड्राइविंग शुरू करें</string>
+
+    <!-- Live Navigation Screen -->
+    <string name="label_remaining">शेष दूरी</string>
+    <string name="label_eta">पहुँचने का समय</string>
+    <string name="action_end_navigation">समाप्त</string>
+    <string name="turn_instruction_default">मुख्य मार्ग पर सीधे आगे बढ़ें</string>
+
+    <!-- Hazard Alert Screen / Overlay -->
+    <string name="hazard_detected_ahead">आगे खतरा पाया गया!</string>
+    <string name="severity_critical">अति गंभीर (Critical)</string>
+    <string name="severity_high">उच्च जोखिम</string>
+    <string name="severity_medium">चेतावनी</string>
+    <string name="severity_low">सूचना</string>
+    <string name="status_road_blocked">सड़क बंद है</string>
+    <string name="status_partially_blocked">आंशिक रूप से बाधित</string>
+    <string name="status_warning">सावधानी बरतें</string>
+    <string name="status_cleared">सुरक्षित / साफ़</string>
+    <string name="distance_ahead_format">%1$s आगे</string>
+    <string name="action_reroute_now">सुरक्षित मार्ग खोजें</string>
+    <string name="action_dismiss">बंद करें</string>
+
+    <!-- Recalculating Route Screen -->
+    <string name="title_recalculating_route">मार्ग फिर से निर्धारित किया जा रहा है...</string>
+    <string name="subtitle_recalculating_route">आपके लिए एक सुरक्षित और बेहतर मार्ग खोजा जा रहा है</string>
+    <string name="action_cancel">रद्द करें</string>
+    <string name="error_recalculation_failed">नया मार्ग निर्धारित करने में असमर्थ।</string>
+    <string name="error_no_safe_route">कोई सुरक्षित वैकल्पिक मार्ग नहीं मिला।</string>
+    <string name="action_view_hazard">खतरा देखें</string>
+    <string name="action_try_again">पुनः प्रयास करें</string>
+
+    <!-- Updated Route Screen -->
+    <string name="banner_route_updated_title">मार्ग अपडेट किया गया</string>
+    <string name="banner_route_updated_subtitle">एक सुरक्षित मार्ग चुना गया है।</string>
+
+    <!-- Journey Completed Screen -->
+    <string name="title_journey_completed">यात्रा पूर्ण हुई!</string>
+    <string name="subtitle_journey_completed">आप सुरक्षित रूप से अपने गंतव्य पर पहुँच गए हैं।</string>
+    <string name="label_total_distance">कुल दूरी</string>
+    <string name="label_total_time">कुल समय</string>
+    <string name="action_done">पूर्ण (Done)</string>
+
+    <!-- History Screen -->
+    <string name="title_journey_history">यात्रा इतिहास</string>
+    <string name="empty_history_title">अभी तक कोई यात्रा पूर्ण नहीं हुई</string>
+    <string name="empty_history_subtitle">आपकी पूर्ण की गई यात्राओं का विवरण यहाँ दिखाई देगा।</string>
+    <string name="action_clear_history">इतिहास साफ़ करें</string>
+    <string name="badge_demo_sample">डेमो डेटा</string>
+
+    <!-- Settings Screen -->
+    <string name="title_settings">सेटिंग्स</string>
+    <string name="setting_language">भाषा (Language)</string>
+    <string name="setting_notifications">खतरा सूचनाएं (Notifications)</string>
+    <string name="setting_navigation_voice">नेविगेशन वॉइस गाइडेंस</string>
+    <string name="setting_sound">चेतावनी ध्वनि और कंपन</string>
+    <string name="setting_units">दूरी की इकाई</string>
+    <string name="setting_operating_mode">संचालन मोड (Live / Demo)</string>
+    <string name="setting_privacy">गोपनीयता और अनुमतियां</string>
+    <string name="setting_about">RoutePilot के बारे में</string>
+    <string name="lang_english">English</string>
+    <string name="lang_hindi">हिन्दी (Hindi)</string>
+    <string name="units_km">किलोमीटर (km)</string>
+    <string name="units_miles">मील (mi)</string>
+    <string name="about_description">RoutePilot ड्राइवर ऐप — IoT-आधारित सड़क और पुल खतरा पहचान तथा बुद्धिमान मार्ग परिवर्तन प्रणाली।</string>
+
+    <!-- Profile Screen -->
+    <string name="title_profile">ड्राइवर प्रोफ़ाइल</string>
+    <string name="action_logout">लॉग आउट करें</string>
+
+    <!-- Errors & Offline -->
+    <string name="error_no_internet">इंटरनेट कनेक्शन नहीं है। कैश किए गए सड़क नेटवर्क का उपयोग हो रहा है।</string>
+    <string name="error_location_unavailable">स्थान उपलब्ध नहीं है। कृपया GPS चालू करें।</string>
+    <string name="error_maps_key_missing">Google Maps API कुंजी कॉन्फ़िगर नहीं है। इंटरैक्टिव फ़ॉलबैक मानचित्र सक्रिय है।</string>
+</resources>
