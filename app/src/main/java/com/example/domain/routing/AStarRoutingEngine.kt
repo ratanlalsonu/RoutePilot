@@ -58,7 +58,7 @@ class AStarRoutingEngine(
             if (u == null || v == null) {
                 edge
             } else {
-                evaluateEdgeAgainstHazards(edge, u, v, effectiveHazards, avoidedHazardIds)
+                evaluateEdgeAgainstHazards(edge, u, v, effectiveHazards, avoidedHazardIds, isRerouting)
             }
         }
 
@@ -87,13 +87,32 @@ class AStarRoutingEngine(
             )
         }
 
+        val primaryCorridorPenaltyIds = if (isRerouting && effectiveHazards.isNotEmpty()) {
+            rawGraph.allEdges
+                .filter { it.id.contains("_R0_") || it.id.contains("N_MAIN") }
+                .map { it.id }
+                .toSet()
+        } else {
+            emptySet()
+        }
+
         // Run A* for primary Best (Recommended / Safest) route
         val primaryPath = runAStarSearch(
             graph = hazardGraph,
             startNodeId = startNodeId,
             goalNodeId = goalNodeId,
-            penalizedEdgeIds = emptySet()
-        )
+            penalizedEdgeIds = primaryCorridorPenaltyIds
+        ) ?: if (isRerouting) {
+            // Fallback if a large-radius hazard overlapped all corridors: penalize primary corridor on rawGraph
+            runAStarSearch(
+                graph = rawGraph,
+                startNodeId = startNodeId,
+                goalNodeId = goalNodeId,
+                penalizedEdgeIds = primaryCorridorPenaltyIds
+            )
+        } else {
+            null
+        }
 
         if (primaryPath == null) {
             return RouteCalculationResult(
@@ -115,15 +134,16 @@ class AStarRoutingEngine(
         )
 
         // Compute the Alternate Route by applying a strong diversity penalty to the edges of the primary path
-        val primaryEdgeIds = if (primaryPath.second.size > 2) {
-            primaryPath.second.map { it.id }.toSet()
-        } else {
-            primaryPath.second.map { it.id }.toSet()
-        }
+        val primaryEdgeIds = primaryPath.second.map { it.id }.toSet()
 
         val altPath = if (primaryEdgeIds.isNotEmpty()) {
             runAStarSearch(
                 graph = hazardGraph,
+                startNodeId = startNodeId,
+                goalNodeId = goalNodeId,
+                penalizedEdgeIds = primaryEdgeIds
+            ) ?: runAStarSearch(
+                graph = rawGraph,
                 startNodeId = startNodeId,
                 goalNodeId = goalNodeId,
                 penalizedEdgeIds = primaryEdgeIds
@@ -140,7 +160,7 @@ class AStarRoutingEngine(
                 pathNodes = altPath.first,
                 pathEdges = altPath.second,
                 isAlternative = true,
-                isDivertedForSafety = false,
+                isDivertedForSafety = isRerouting,
                 avoidedHazardIds = avoidedHazardIds.toList()
             )
         } else {
@@ -159,7 +179,8 @@ class AStarRoutingEngine(
         nodeU: RoadNode,
         nodeV: RoadNode,
         hazards: List<Hazard>,
-        avoidedHazardIds: MutableSet<String>
+        avoidedHazardIds: MutableSet<String>,
+        isRerouting: Boolean
     ): RoadEdge {
         var isBlocked = edge.blocked
         var totalPenalty = edge.hazardPenaltySeconds
@@ -180,30 +201,36 @@ class AStarRoutingEngine(
 
             if (matchesId || distToEdge <= hazard.radiusMeters) {
                 avoidedHazardIds.add(hazard.id)
-                when (hazard.status) {
-                    HazardStatus.BLOCKED -> {
-                        isBlocked = true
-                        worstStatus = RoadStatus.BLOCKED
-                    }
-                    HazardStatus.PARTIALLY_BLOCKED -> {
-                        worstStatus = RoadStatus.CRITICAL
-                        totalPenalty += when (hazard.severity) {
-                            HazardSeverity.CRITICAL -> 3600.0
-                            HazardSeverity.HIGH -> 1800.0
-                            HazardSeverity.MEDIUM -> 900.0
-                            HazardSeverity.LOW -> 450.0
+                if (isRerouting) {
+                    isBlocked = true
+                    worstStatus = RoadStatus.BLOCKED
+                    totalPenalty += 36_000.0
+                } else {
+                    when (hazard.status) {
+                        HazardStatus.BLOCKED -> {
+                            isBlocked = true
+                            worstStatus = RoadStatus.BLOCKED
                         }
-                    }
-                    HazardStatus.WARNING -> {
-                        if (worstStatus == RoadStatus.NORMAL) worstStatus = RoadStatus.WARNING
-                        totalPenalty += when (hazard.severity) {
-                            HazardSeverity.CRITICAL -> 2400.0
-                            HazardSeverity.HIGH -> 1200.0
-                            HazardSeverity.MEDIUM -> 600.0
-                            HazardSeverity.LOW -> 240.0
+                        HazardStatus.PARTIALLY_BLOCKED -> {
+                            worstStatus = RoadStatus.CRITICAL
+                            totalPenalty += when (hazard.severity) {
+                                HazardSeverity.CRITICAL -> 3600.0
+                                HazardSeverity.HIGH -> 1800.0
+                                HazardSeverity.MEDIUM -> 900.0
+                                HazardSeverity.LOW -> 450.0
+                            }
                         }
+                        HazardStatus.WARNING -> {
+                            if (worstStatus == RoadStatus.NORMAL) worstStatus = RoadStatus.WARNING
+                            totalPenalty += when (hazard.severity) {
+                                HazardSeverity.CRITICAL -> 2400.0
+                                HazardSeverity.HIGH -> 1200.0
+                                HazardSeverity.MEDIUM -> 600.0
+                                HazardSeverity.LOW -> 240.0
+                            }
+                        }
+                        HazardStatus.CLEARED -> Unit
                     }
-                    HazardStatus.CLEARED -> Unit
                 }
             }
         }
@@ -371,7 +398,7 @@ class AStarRoutingEngine(
                 for (pt in edge.geometry) {
                     val lastPt = roadGeometryPoints.lastOrNull()
                     if (lastPt == null ||
-                        GeoUtils.haversineMeters(lastPt.latitude, lastPt.longitude, pt.latitude, pt.longitude) > 1.5
+                        GeoUtils.haversineMeters(lastPt.latitude, lastPt.longitude, pt.latitude, pt.longitude) > 0.05
                     ) {
                         roadGeometryPoints.add(pt)
                     }

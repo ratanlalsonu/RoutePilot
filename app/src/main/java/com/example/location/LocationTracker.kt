@@ -71,8 +71,8 @@ class LocationTracker(
 
     @SuppressLint("MissingPermission")
     fun observeLocationUpdates(
-        intervalMillis: Long = 2500L,
-        minDistanceMeters: Float = 4f
+        intervalMillis: Long = 1000L,
+        minDistanceMeters: Float = 0f
     ): Flow<LocationPoint> = callbackFlow {
         if (!hasLocationPermission()) {
             close()
@@ -80,6 +80,7 @@ class LocationTracker(
         }
 
         val request = LocationRequest.Builder(Priority.PRIORITY_HIGH_ACCURACY, intervalMillis)
+            .setMinUpdateIntervalMillis(400L)
             .setMinUpdateDistanceMeters(minDistanceMeters)
             .setWaitForAccurateLocation(false)
             .build()

@@ -122,6 +122,8 @@ class RoutePilotViewModel(
     private var searchDebounceJob: Job? = null
     private var navigationStartTimestamp: Long = 0L
     private var handledHazardIdsForCurrentRoute = mutableSetOf<String>()
+    private var rawBackendHazards: List<Hazard> = emptyList()
+    private var initialPrimaryRoute: Route? = null
 
     init {
         observePreferencesAndData()
@@ -174,9 +176,61 @@ class RoutePilotViewModel(
         viewModelScope.launch {
             hazardRepository.observeActiveHazards(OperatingMode.LIVE)
                 .collectLatest { hazards ->
-                    _uiState.update { it.copy(activeHazards = hazards) }
-                    evaluateActiveNavigationAgainstHazards(hazards)
+                    rawBackendHazards = hazards
+                    val referenceRoute = initialPrimaryRoute
+                        ?: _uiState.value.previousRouteBeforeDiversion
+                        ?: _uiState.value.activeRoute
+                        ?: _uiState.value.recommendedRoute
+                    val aligned = alignHazardsWithRoutePath(hazards, referenceRoute)
+                    _uiState.update { it.copy(activeHazards = aligned) }
+                    evaluateActiveNavigationAgainstHazards(aligned)
                 }
+        }
+    }
+
+    /**
+     * Ensures that when an Admin triggers/creates an active hazard in the Admin Panel,
+     * the hazard is positioned directly on the road path the user was travelling on (`referenceRoute`),
+     * so the hazard marker + warning zone is clearly indicated on that exact path before the user
+     * chooses another path.
+     */
+    private fun alignHazardsWithRoutePath(
+        hazards: List<Hazard>,
+        referenceRoute: Route?
+    ): List<Hazard> {
+        val pts = referenceRoute?.points.orEmpty()
+        if (pts.size < 2) return hazards
+
+        val midIndex = (pts.size / 2).coerceIn(0, pts.lastIndex)
+        val midPt = pts[midIndex]
+
+        return hazards.mapIndexed { idx, hazard ->
+            if (!hazard.isEffectiveHazard) return@mapIndexed hazard
+
+            val nearestPt = pts.minByOrNull { pt ->
+                GeoUtils.haversineMeters(hazard.latitude, hazard.longitude, pt.latitude, pt.longitude)
+            } ?: midPt
+
+            val distToNearestMeters = GeoUtils.haversineMeters(
+                hazard.latitude,
+                hazard.longitude,
+                nearestPt.latitude,
+                nearestPt.longitude
+            )
+
+            val anchorPt = if (distToNearestMeters <= 1800.0) {
+                nearestPt
+            } else {
+                // Anchor Admin preset/remote hazard directly onto the driver's active path midpoint
+                val offsetIdx = (midIndex + (idx * 3)).coerceIn(1, (pts.lastIndex - 1).coerceAtLeast(1))
+                pts[offsetIdx]
+            }
+
+            hazard.copy(
+                latitude = anchorPt.latitude,
+                longitude = anchorPt.longitude,
+                radiusMeters = max(hazard.radiusMeters, 280.0)
+            )
         }
     }
 
@@ -213,7 +267,8 @@ class RoutePilotViewModel(
         val state = _uiState.value
         val activeRoute = state.activeRoute
         val isDriving = state.workflowState == NavigationWorkflowState.NAVIGATING ||
-            state.workflowState == NavigationWorkflowState.ROUTE_UPDATED
+            state.workflowState == NavigationWorkflowState.ROUTE_UPDATED ||
+            state.workflowState == NavigationWorkflowState.HAZARD_DETECTED
 
         if (!isDriving || activeRoute == null) {
             _uiState.update { it.copy(currentLocation = newPoint) }
@@ -231,14 +286,7 @@ class RoutePilotViewModel(
             return
         }
 
-        // 2. Check off-route deviation
-        if (routeImpactDetector.isDriverOffRoute(newPoint, activeRoute)) {
-            _uiState.update { it.copy(currentLocation = newPoint) }
-            triggerAutomaticRerouting(reasonHazard = null)
-            return
-        }
-
-        // 3. Update remaining distance and ETA based on driver progress along route
+        // 2. Update remaining distance and ETA based on driver progress along route
         val distToDest = GeoUtils.haversineMeters(
             newPoint.latitude,
             newPoint.longitude,
@@ -257,13 +305,14 @@ class RoutePilotViewModel(
             )
         }
 
-        // 4. Re-check hazard impact at the new location
+        // 3. Re-check hazard impact at the new location
         evaluateActiveNavigationAgainstHazards(state.activeHazards)
     }
 
     /**
      * Evaluates whether any active hazard from the Backend / Firestore affects the driver's
-     * selected route (in Route Preview or Live Navigation).
+     * current route. When a hazard occurs on the path the user is travelling on, it indicates
+     * the hazard on that path and prompts the user to "Choose Other Path" (no auto-reroute timer).
      */
     private fun evaluateActiveNavigationAgainstHazards(hazards: List<Hazard>) {
         val state = _uiState.value
@@ -284,15 +333,17 @@ class RoutePilotViewModel(
             )
         }
 
+        // Do not re-trigger hazard alert if the user has already chosen the new diverted safer path
+        if (route.isDivertedForSafety) {
+            return
+        }
+
         if (isNavigating && impact.isAffected) {
             val hazard = impact.primaryAffectingHazard ?: return
             val hazardVersionKey = "${hazard.id}_${hazard.status}_${hazard.severity}_${hazard.type}"
             if (!handledHazardIdsForCurrentRoute.contains(hazardVersionKey)) {
                 handledHazardIdsForCurrentRoute.add(hazardVersionKey)
-                onRouteAffectingHazardDetected(
-                    hazard = hazard,
-                    autoReroute = impact.requiresImmediateReroute
-                )
+                onRouteAffectingHazardDetected(hazard = hazard)
             }
         } else if (state.workflowState == NavigationWorkflowState.HAZARD_DETECTED && !impact.isAffected) {
             _uiState.update {
@@ -305,11 +356,9 @@ class RoutePilotViewModel(
         }
     }
 
-    private fun onRouteAffectingHazardDetected(
-        hazard: Hazard,
-        autoReroute: Boolean
-    ) {
+    private fun onRouteAffectingHazardDetected(hazard: Hazard) {
         val prefs = _uiState.value.preferences
+        recalculationJob?.cancel()
         _uiState.update {
             it.copy(
                 workflowState = NavigationWorkflowState.HAZARD_DETECTED,
@@ -329,36 +378,34 @@ class RoutePilotViewModel(
             soundEnabled = prefs.alertSoundEnabled,
             voiceEnabled = prefs.navigationVoiceEnabled && !_uiState.value.isVoiceMutedInNav
         )
-
-        if (autoReroute) {
-            recalculationJob?.cancel()
-            recalculationJob = viewModelScope.launch {
-                delay(3800L)
-                if (_uiState.value.workflowState == NavigationWorkflowState.HAZARD_DETECTED) {
-                    triggerAutomaticRerouting(reasonHazard = hazard)
-                }
-            }
-        }
     }
 
+    /**
+     * Invoked when the user explicitly clicks "Choose Other Path" after a hazard is indicated
+     * on their current route. Switches to the alternate/safer road corridor and highlights the new route.
+     */
     fun triggerAutomaticRerouting(reasonHazard: Hazard? = _uiState.value.primaryAffectingHazard) {
         recalculationJob?.cancel()
         recalculationJob = viewModelScope.launch {
-            val currentRoute = _uiState.value.activeRoute
-            val dest = currentRoute?.destination ?: _uiState.value.selectedDestination
-            val origin = _uiState.value.currentLocation
-            val hazards = _uiState.value.activeHazards
+            val stateBefore = _uiState.value
+            val wasInPreview = stateBefore.workflowState == NavigationWorkflowState.ROUTE_READY ||
+                stateBefore.workflowState == NavigationWorkflowState.DESTINATION_SELECTED
+            val currentRoute = stateBefore.activeRoute ?: stateBefore.recommendedRoute
+            val dest = currentRoute?.destination ?: stateBefore.selectedDestination
+            val origin = stateBefore.currentLocation
+            val hazards = stateBefore.activeHazards
 
-            _uiState.update {
-                it.copy(
-                    workflowState = NavigationWorkflowState.RECALCULATING,
-                    recalculationProgress = 0.15f,
-                    recalculationErrorMessage = null
-                )
+            if (!wasInPreview) {
+                _uiState.update {
+                    it.copy(
+                        workflowState = NavigationWorkflowState.RECALCULATING,
+                        recalculationProgress = 0.20f,
+                        recalculationErrorMessage = null
+                    )
+                }
+                delay(280L)
+                _uiState.update { it.copy(recalculationProgress = 0.65f) }
             }
-
-            delay(350L)
-            _uiState.update { it.copy(recalculationProgress = 0.52f) }
 
             val calcResult = routingRepository.calculateRoutes(
                 origin = origin,
@@ -367,15 +414,42 @@ class RoutePilotViewModel(
                 isRerouting = true
             )
 
-            delay(450L)
-            _uiState.update { it.copy(recalculationProgress = 0.92f) }
-            delay(200L)
+            if (!wasInPreview) {
+                delay(280L)
+                _uiState.update { it.copy(recalculationProgress = 0.95f) }
+            }
 
-            val newSaferRoute = calcResult.recommendedRoute
-            if (newSaferRoute == null) {
+            val candidateRec = calcResult.recommendedRoute
+            val candidateAlt = calcResult.alternateRoute ?: stateBefore.alternateRoute
+
+            // Guarantee that choosing "Other Path" selects a distinct road corridor from currentRoute when available
+            val chosenOtherRoute = when {
+                candidateRec != null && currentRoute != null && !areRoutesOnSameCorridor(currentRoute, candidateRec) -> {
+                    candidateRec.copy(
+                        isDivertedForSafety = true,
+                        avoidedHazardIds = hazards.map { it.id }.ifEmpty { listOfNotNull(reasonHazard?.id) }
+                    )
+                }
+                candidateAlt != null -> {
+                    candidateAlt.copy(
+                        isAlternative = false,
+                        isDivertedForSafety = true,
+                        avoidedHazardIds = hazards.map { it.id }.ifEmpty { listOfNotNull(reasonHazard?.id) }
+                    )
+                }
+                candidateRec != null -> {
+                    candidateRec.copy(
+                        isDivertedForSafety = true,
+                        avoidedHazardIds = hazards.map { it.id }.ifEmpty { listOfNotNull(reasonHazard?.id) }
+                    )
+                }
+                else -> null
+            }
+
+            if (chosenOtherRoute == null) {
                 _uiState.update {
                     it.copy(
-                        workflowState = NavigationWorkflowState.RECALCULATING,
+                        workflowState = if (wasInPreview) NavigationWorkflowState.ROUTE_READY else NavigationWorkflowState.RECALCULATING,
                         recalculationProgress = 0f,
                         recalculationErrorMessage = calcResult.errorMessage ?: "No safe alternative route found."
                     )
@@ -383,18 +457,20 @@ class RoutePilotViewModel(
                 return@launch
             }
 
-            val nextSegment = newSaferRoute.segments.firstOrNull()
+            val nextSegment = chosenOtherRoute.segments.firstOrNull()
             _uiState.update {
                 it.copy(
-                    workflowState = NavigationWorkflowState.ROUTE_UPDATED,
+                    workflowState = if (wasInPreview) NavigationWorkflowState.ROUTE_READY else NavigationWorkflowState.ROUTE_UPDATED,
                     previousRouteBeforeDiversion = currentRoute,
-                    activeRoute = newSaferRoute,
-                    recommendedRoute = newSaferRoute,
-                    remainingDistanceMeters = newSaferRoute.totalDistanceMeters,
-                    remainingEtaMinutes = newSaferRoute.durationMinutes,
+                    activeRoute = chosenOtherRoute,
+                    recommendedRoute = chosenOtherRoute,
+                    isUsingAlternateInPreview = false,
+                    remainingDistanceMeters = chosenOtherRoute.totalDistanceMeters,
+                    remainingEtaMinutes = chosenOtherRoute.durationMinutes,
                     currentTurnDistanceMeters = 350.0,
                     currentTurnInstruction = nextSegment?.instruction ?: "Continue onto safer route",
                     currentTurnManeuver = nextSegment?.maneuverType ?: "LEFT",
+                    primaryAffectingHazard = null,
                     recalculationProgress = 1f,
                     recalculationErrorMessage = null
                 )
@@ -404,6 +480,13 @@ class RoutePilotViewModel(
                 voiceEnabled = _uiState.value.preferences.navigationVoiceEnabled && !_uiState.value.isVoiceMutedInNav
             )
         }
+    }
+
+    private fun areRoutesOnSameCorridor(routeA: Route, routeB: Route): Boolean {
+        if (routeA.points.size < 2 || routeB.points.size < 2) return false
+        val midA = routeA.points[routeA.points.size / 2]
+        val midB = routeB.points[routeB.points.size / 2]
+        return GeoUtils.haversineMeters(midA.latitude, midA.longitude, midB.latitude, midB.longitude) < 75.0
     }
 
     // ========================================================================
@@ -532,15 +615,51 @@ class RoutePilotViewModel(
         onSelected()
     }
 
+    private fun localizeDestinationToDriverRegion(
+        destination: Destination,
+        currentLocation: LocationPoint
+    ): Destination {
+        if (!destination.id.startsWith("dest_")) return destination
+        val distMeters = GeoUtils.haversineMeters(
+            currentLocation.latitude,
+            currentLocation.longitude,
+            destination.latitude,
+            destination.longitude
+        )
+        if (distMeters <= 35_000.0) return destination
+
+        val refOrigin = OsmRoadNetworkProvider.DEFAULT_ORIGIN
+        val rawDLat = (destination.latitude - refOrigin.latitude) * 0.45
+        val rawDLng = (destination.longitude - refOrigin.longitude) * 0.45
+        val dLat = if (kotlin.math.abs(rawDLat) < 0.004) 0.0085 else rawDLat.coerceIn(-0.024, 0.024)
+        val dLng = if (kotlin.math.abs(rawDLng) < 0.004) 0.0110 else rawDLng.coerceIn(-0.024, 0.024)
+
+        val localLat = currentLocation.latitude + dLat
+        val localLng = currentLocation.longitude + dLng
+        val localDistKm = GeoUtils.haversineMeters(
+            currentLocation.latitude,
+            currentLocation.longitude,
+            localLat,
+            localLng
+        ) / 1000.0
+
+        return destination.copy(
+            latitude = localLat,
+            longitude = localLng,
+            distanceFromUserKm = (localDistKm * 1.25).coerceAtLeast(1.2)
+        )
+    }
+
     fun selectDestinationCandidate(destination: Destination) {
+        val localized = localizeDestinationToDriverRegion(destination, _uiState.value.currentLocation)
         _uiState.update {
             it.copy(
-                selectedDestination = destination,
+                selectedDestination = localized,
                 workflowState = NavigationWorkflowState.DESTINATION_SELECTED
             )
         }
         viewModelScope.launch {
-            destinationRepository.saveRecentDestination(destination.copy(isDemoSample = false))
+            destinationRepository.saveRecentDestination(localized.copy(isDemoSample = false))
         }
     }
 
@@ -580,25 +699,34 @@ class RoutePilotViewModel(
     // ========================================================================
 
     fun confirmDestinationAndCalculatePreview(onRouteReady: () -> Unit) {
-        val dest = _uiState.value.selectedDestination
+        val rawDest = _uiState.value.selectedDestination
+        val dest = localizeDestinationToDriverRegion(rawDest, _uiState.value.currentLocation)
         viewModelScope.launch {
-            _uiState.update { it.copy(workflowState = NavigationWorkflowState.ROUTE_CALCULATING) }
+            _uiState.update {
+                it.copy(
+                    selectedDestination = dest,
+                    workflowState = NavigationWorkflowState.ROUTE_CALCULATING
+                )
+            }
             destinationRepository.saveRecentDestination(dest.copy(isDemoSample = false))
 
+            // Calculate initial primary path without pre-diverting so any Admin hazard is indicated on the user's path first
             val calcResult = routingRepository.calculateRoutes(
                 origin = _uiState.value.currentLocation,
                 destination = dest,
-                hazards = _uiState.value.activeHazards,
+                hazards = emptyList(),
                 isRerouting = false
             )
 
             val rec = calcResult.recommendedRoute
             val alt = calcResult.alternateRoute
             if (rec != null) {
+                initialPrimaryRoute = rec
+                val alignedHazards = alignHazardsWithRoutePath(rawBackendHazards.ifEmpty { _uiState.value.activeHazards }, rec)
                 val impact = routeImpactDetector.analyzeRouteImpact(
                     currentLocation = _uiState.value.currentLocation,
                     activeRoute = rec,
-                    activeHazards = _uiState.value.activeHazards
+                    activeHazards = alignedHazards
                 )
                 _uiState.update {
                     it.copy(
@@ -606,7 +734,9 @@ class RoutePilotViewModel(
                         recommendedRoute = rec,
                         alternateRoute = alt,
                         activeRoute = rec,
+                        previousRouteBeforeDiversion = null,
                         isUsingAlternateInPreview = false,
+                        activeHazards = alignedHazards,
                         remainingDistanceMeters = rec.totalDistanceMeters,
                         remainingEtaMinutes = rec.durationMinutes,
                         relevantHazardsOnRoute = impact.allRelevantHazards,

@@ -87,24 +87,19 @@ fun RoutePreviewScreen(
     hasLocationPermission: Boolean,
     useKilometers: Boolean,
     onSelectRouteOption: (useAlternate: Boolean) -> Unit,
+    onChooseOtherPath: () -> Unit = { onSelectRouteOption(true) },
     onStartDriving: () -> Unit,
     onBack: () -> Unit
 ) {
     var isMapExpanded by remember { mutableStateOf(false) }
 
-    val activeRoute = if (isUsingAlternate && alternateRoute != null) alternateRoute else recommendedRoute
-    val recDistText = recommendedRoute?.let { GeoUtils.formatDistance(it.totalDistanceMeters, useKilometers) } ?: "18.4 km"
-    val recTimeText = recommendedRoute?.let { "${it.durationMinutes} min" } ?: "32 min"
-    val altDistText = alternateRoute?.let { GeoUtils.formatDistance(it.totalDistanceMeters, useKilometers) } ?: "21.7 km"
-    val altTimeText = alternateRoute?.let { "${it.durationMinutes} min" } ?: "36 min"
-
-    val selectedDistText = if (isUsingAlternate) altDistText else recDistText
-    val selectedTimeText = if (isUsingAlternate) altTimeText else recTimeText
+    val activeRoute = recommendedRoute
+    val selectedDistText = activeRoute?.let { GeoUtils.formatDistance(it.totalDistanceMeters, useKilometers) } ?: "18.4 km"
+    val selectedTimeText = activeRoute?.let { "${it.durationMinutes} min" } ?: "32 min"
     val roadConditionText = activeRoute?.roadConditionSummary ?: stringResource(R.string.condition_mostly_good)
 
-    val avoidedOrNearbyHazard = activeHazards.firstOrNull { hazard ->
-        hazard.isEffectiveHazard && (activeRoute?.avoidedHazardIds?.contains(hazard.id) == true)
-    } ?: activeHazards.firstOrNull { it.isEffectiveHazard }
+    val hazardOnCurrentPath = activeHazards.firstOrNull { it.isEffectiveHazard }
+    val isAlreadyDiverted = activeRoute?.isDivertedForSafety == true
 
     Column(
         modifier = Modifier
@@ -192,14 +187,14 @@ fun RoutePreviewScreen(
             }
         }
 
-        // If an active hazard from Admin Panel / Backend is present on the corridor, show compact Type & Severity Banner
-        if (avoidedOrNearbyHazard != null && !isMapExpanded) {
+        // If an active hazard from Admin Panel / Backend is present on the corridor, indicate hazard & offer "Choose Other Path"
+        if (hazardOnCurrentPath != null && !isMapExpanded) {
             Spacer(modifier = Modifier.height(4.dp))
-            val isCritical = avoidedOrNearbyHazard.severity == HazardSeverity.CRITICAL ||
-                avoidedOrNearbyHazard.severity == HazardSeverity.HIGH
-            val bannerBg = if (isCritical) Color(0xFFFFEBEE) else Color(0xFFFFF3E0)
-            val accentColor = if (isCritical) HazardRed else HazardOrange
-            val statusLabel = when (avoidedOrNearbyHazard.status) {
+            val isCritical = hazardOnCurrentPath.severity == HazardSeverity.CRITICAL ||
+                hazardOnCurrentPath.severity == HazardSeverity.HIGH
+            val bannerBg = if (isAlreadyDiverted) Color(0xFFDCFCE7) else if (isCritical) Color(0xFFFFEBEE) else Color(0xFFFFF3E0)
+            val accentColor = if (isAlreadyDiverted) SafeRouteGreen else if (isCritical) HazardRed else HazardOrange
+            val statusLabel = when (hazardOnCurrentPath.status) {
                 HazardStatus.BLOCKED -> stringResource(R.string.status_road_blocked)
                 HazardStatus.PARTIALLY_BLOCKED -> stringResource(R.string.status_partially_blocked)
                 else -> stringResource(R.string.status_warning)
@@ -214,11 +209,11 @@ fun RoutePreviewScreen(
                     .testTag("route_preview_hazard_indicator")
             ) {
                 Row(
-                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
+                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 7.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     Icon(
-                        imageVector = Icons.Default.Warning,
+                        imageVector = if (isAlreadyDiverted) Icons.Default.VerifiedUser else Icons.Default.Warning,
                         contentDescription = null,
                         tint = accentColor,
                         modifier = Modifier.size(18.dp)
@@ -226,7 +221,11 @@ fun RoutePreviewScreen(
                     Spacer(modifier = Modifier.width(8.dp))
                     Column(modifier = Modifier.weight(1f)) {
                         Text(
-                            text = "${avoidedOrNearbyHazard.name} • ${avoidedOrNearbyHazard.type.displayName}",
+                            text = if (isAlreadyDiverted) {
+                                "New Path Highlighted (Hazard Avoided)"
+                            } else {
+                                "Hazard on Path: ${hazardOnCurrentPath.name} • ${hazardOnCurrentPath.type.displayName}"
+                            },
                             style = MaterialTheme.typography.labelLarge.copy(
                                 fontWeight = FontWeight.Bold,
                                 color = accentColor,
@@ -236,7 +235,11 @@ fun RoutePreviewScreen(
                             overflow = TextOverflow.Ellipsis
                         )
                         Text(
-                            text = "${avoidedOrNearbyHazard.severity.name} — $statusLabel (Safer route highlighted)",
+                            text = if (isAlreadyDiverted) {
+                                "Safer road route is now highlighted on map"
+                            } else {
+                                "${hazardOnCurrentPath.severity.name} — $statusLabel on current path"
+                            },
                             style = MaterialTheme.typography.bodyMedium.copy(
                                 fontSize = 11.sp,
                                 color = Color(0xFF334155)
@@ -245,13 +248,32 @@ fun RoutePreviewScreen(
                             overflow = TextOverflow.Ellipsis
                         )
                     }
+
+                    if (!isAlreadyDiverted) {
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Button(
+                            onClick = onChooseOtherPath,
+                            shape = RoundedCornerShape(10.dp),
+                            colors = ButtonDefaults.buttonColors(containerColor = accentColor),
+                            modifier = Modifier
+                                .height(34.dp)
+                                .testTag("preview_choose_other_path_button")
+                        ) {
+                            Text(
+                                text = stringResource(R.string.action_reroute_now),
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = Color.White
+                            )
+                        }
+                    }
                 }
             }
         }
 
         Spacer(modifier = Modifier.height(6.dp))
 
-        // Large Expansive Google Map Preview Box (Takes up ~70-80% of the screen!)
+        // Large Expansive Google Map Preview Box (Single active route highlighted on exact road)
         Card(
             shape = RoundedCornerShape(20.dp),
             elevation = CardDefaults.cardElevation(defaultElevation = 4.dp),
@@ -264,13 +286,14 @@ fun RoutePreviewScreen(
                     currentLocation = currentLocation,
                     destination = destination,
                     primaryRoute = activeRoute,
-                    secondaryRoute = if (isUsingAlternate) recommendedRoute else alternateRoute,
+                    secondaryRoute = null,
                     hazards = activeHazards,
                     isNavigationMode = false,
+                    isSaferGreenRoute = isAlreadyDiverted,
                     isMapsApiKeyConfigured = isMapsApiKeyConfigured,
                     hasLocationPermission = hasLocationPermission,
                     showNavigationControls = false,
-                    onSelectAlternateRoute = { onSelectRouteOption(!isUsingAlternate) },
+                    onSelectAlternateRoute = null,
                     modifier = Modifier.fillMaxSize()
                 )
 
@@ -312,36 +335,6 @@ fun RoutePreviewScreen(
         Spacer(modifier = Modifier.height(8.dp))
 
         if (!isMapExpanded) {
-            // Side-by-Side Recommended vs Alternate Route Cards (Compact)
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                RouteOptionCard(
-                    label = stringResource(R.string.label_recommended_route),
-                    distanceText = recDistText,
-                    durationText = recTimeText,
-                    isSelected = !isUsingAlternate,
-                    onClick = { onSelectRouteOption(false) },
-                    modifier = Modifier
-                        .weight(1f)
-                        .testTag("route_option_recommended")
-                )
-
-                RouteOptionCard(
-                    label = stringResource(R.string.label_alternate_route),
-                    distanceText = altDistText,
-                    durationText = altTimeText,
-                    isSelected = isUsingAlternate,
-                    onClick = { onSelectRouteOption(true) },
-                    modifier = Modifier
-                        .weight(1f)
-                        .testTag("route_option_alternate")
-                )
-            }
-
-            Spacer(modifier = Modifier.height(6.dp))
-
             // Compact Single-Row Summary Bar (Distance • ETA • Road Condition)
             Surface(
                 shape = RoundedCornerShape(12.dp),
@@ -352,7 +345,7 @@ fun RoutePreviewScreen(
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(horizontal = 12.dp, vertical = 8.dp),
+                        .padding(horizontal = 12.dp, vertical = 10.dp),
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.SpaceBetween
                 ) {
@@ -360,7 +353,7 @@ fun RoutePreviewScreen(
                         Icon(
                             imageVector = Icons.Default.Route,
                             contentDescription = null,
-                            tint = RoutePilotBlue,
+                            tint = if (isAlreadyDiverted) SafeRouteGreen else RoutePilotBlue,
                             modifier = Modifier.size(16.dp)
                         )
                         Spacer(modifier = Modifier.width(4.dp))
@@ -375,7 +368,7 @@ fun RoutePreviewScreen(
                         Icon(
                             imageVector = Icons.Default.AccessTime,
                             contentDescription = null,
-                            tint = RoutePilotBlue,
+                            tint = if (isAlreadyDiverted) SafeRouteGreen else RoutePilotBlue,
                             modifier = Modifier.size(16.dp)
                         )
                         Spacer(modifier = Modifier.width(4.dp))
@@ -430,58 +423,5 @@ fun RoutePreviewScreen(
         }
 
         Spacer(modifier = Modifier.height(6.dp))
-    }
-}
-
-@Composable
-private fun RouteOptionCard(
-    label: String,
-    distanceText: String,
-    durationText: String,
-    isSelected: Boolean,
-    onClick: () -> Unit,
-    modifier: Modifier = Modifier
-) {
-    Card(
-        shape = RoundedCornerShape(14.dp),
-        colors = CardDefaults.cardColors(
-            containerColor = if (isSelected) RoutePilotBlueLight else Color.White
-        ),
-        border = BorderStroke(
-            width = if (isSelected) 2.dp else 1.dp,
-            color = if (isSelected) RoutePilotBlue else Color(0xFFD8E0EC)
-        ),
-        modifier = modifier.clickable(onClick = onClick)
-    ) {
-        Column(modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp)) {
-            Text(
-                text = label,
-                style = MaterialTheme.typography.labelMedium.copy(fontSize = 11.sp),
-                color = if (isSelected) RoutePilotBlue else Color(0xFF64748B),
-                fontWeight = FontWeight.Bold,
-                maxLines = 1
-            )
-            Spacer(modifier = Modifier.height(2.dp))
-            Row(
-                verticalAlignment = Alignment.Bottom,
-                horizontalArrangement = Arrangement.spacedBy(6.dp)
-            ) {
-                Text(
-                    text = distanceText,
-                    style = MaterialTheme.typography.titleMedium.copy(
-                        fontWeight = FontWeight.ExtraBold,
-                        color = Color(0xFF0F172A)
-                    )
-                )
-                Text(
-                    text = "• $durationText",
-                    style = MaterialTheme.typography.bodyMedium.copy(
-                        fontWeight = FontWeight.SemiBold,
-                        color = Color(0xFF475569),
-                        fontSize = 12.sp
-                    )
-                )
-            }
-        }
     }
 }

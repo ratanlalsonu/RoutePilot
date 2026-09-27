@@ -1,11 +1,16 @@
 package com.example.ui.components
 
+import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.LinearGradient
 import android.graphics.Paint
 import android.graphics.RectF
 import android.graphics.Shader
 import android.graphics.Typeface
+import android.hardware.Sensor
+import android.hardware.SensorEvent
+import android.hardware.SensorEventListener
+import android.hardware.SensorManager
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -35,6 +40,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
@@ -48,6 +54,7 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.toArgb
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -66,7 +73,10 @@ import com.google.android.gms.maps.model.BitmapDescriptorFactory
 import com.google.android.gms.maps.model.CameraPosition
 import com.google.android.gms.maps.model.Dot
 import com.google.android.gms.maps.model.Gap
+import com.google.android.gms.maps.model.JointType
 import com.google.android.gms.maps.model.LatLng
+import com.google.android.gms.maps.model.LatLngBounds
+import com.google.android.gms.maps.model.RoundCap
 import com.google.maps.android.compose.Circle
 import com.google.maps.android.compose.GoogleMap
 import com.google.maps.android.compose.MapProperties
@@ -76,6 +86,7 @@ import com.google.maps.android.compose.Marker
 import com.google.maps.android.compose.MarkerState
 import com.google.maps.android.compose.Polyline
 import com.google.maps.android.compose.rememberCameraPositionState
+import kotlin.math.abs
 import kotlin.math.atan2
 import kotlin.math.cos
 import kotlin.math.max
@@ -92,12 +103,11 @@ private data class RoadGuidanceArrowSpec(
 
 /**
  * 100% Google Maps SDK Engine (`com.google.maps.android.compose.GoogleMap`) for RoutePilot:
- * - Highlights Best Route (Primary Blue / Safer Green) and Alternate Route directly on Google Maps roads
- * - Interactive Alternate Route selection (tap alternate route polyline or badge on map)
- * - Bespoke 3D Swept-Wing Navigation Arrow inside a frosted white puck
- * - White-with-navy-outline directional road guidance arrows (`══════►`) along the active road
- * - Route corridor pacing dots (`• • •`) and dotted approach connector with road anchor node
- * - Red-needle "N" Compass control
+ * - Highlights the active route (Primary Blue / Safer Green after "Choose Other Path") AND exact-path
+ *   dotted highlight (`Dot(), Gap(16f)`) strictly on the exact road polyline (`routePoints`)
+ * - Rotates and moves the 3D Swept-Wing Navigation Arrow in real time as the user rotates or moves
+ *   their mobile phone (via Android Rotation Vector / Compass / Accelerometer+Magnetometer sensors + GPS)
+ * - Preserves user zoom-in and pan position during active navigation without snapping back to source
  */
 private val sharedSatelliteModeState = mutableStateOf(false)
 
@@ -120,44 +130,107 @@ fun RoutePilotMapView(
     modifier: Modifier = Modifier
 ) {
     var zoomLevel by remember(isNavigationMode) {
-        mutableFloatStateOf(if (isNavigationMode) 16.5f else 13.8f)
+        mutableFloatStateOf(if (isNavigationMode) 17.0f else 14.5f)
     }
+    var manualZoomTrigger by remember { mutableIntStateOf(0) }
     var recenterTrigger by remember { mutableIntStateOf(0) }
     var isSatelliteMode by remember { sharedSatelliteModeState }
 
     val isGreenTheme = isSaferGreenRoute || (primaryRoute?.isDivertedForSafety == true)
 
-    // Compute route heading bearing and road entry anchor point
+    // Exact nearest point on the active route polyline
     val nearestRouteAnchor = remember(currentLocation.latitude, currentLocation.longitude, primaryRoute) {
-        findNearestRouteEntryPoint(currentLocation, primaryRoute)
+        findNearestPointOnRoutePolyline(currentLocation, primaryRoute)
     }
 
-    val headingBearingDegrees = remember(
-        currentLocation.latitude,
-        currentLocation.longitude,
+    // Allow free driver arrow movement when the user moves their mobile phone; only snap to road centerline
+    // when strictly progressing along an interior road segment within 12m
+    val displayDriverLocation = remember(currentLocation, nearestRouteAnchor, isNavigationMode) {
+        if (nearestRouteAnchor != null) {
+            val distToRoad = GeoUtils.haversineMeters(
+                currentLocation.latitude,
+                currentLocation.longitude,
+                nearestRouteAnchor.latitude,
+                nearestRouteAnchor.longitude
+            )
+            val roadStart = primaryRoute?.points?.firstOrNull()
+            val distFromStart = if (roadStart != null) {
+                GeoUtils.haversineMeters(
+                    currentLocation.latitude,
+                    currentLocation.longitude,
+                    roadStart.latitude,
+                    roadStart.longitude
+                )
+            } else {
+                0.0
+            }
+            val snapThreshold = if (isNavigationMode) 12.0 else 28.0
+            if (distToRoad <= snapThreshold && (!isNavigationMode || distFromStart > 18.0)) {
+                nearestRouteAnchor
+            } else {
+                currentLocation
+            }
+        } else {
+            currentLocation
+        }
+    }
+
+    val routeHeadingBearingDegrees = remember(
+        displayDriverLocation.latitude,
+        displayDriverLocation.longitude,
         primaryRoute,
         destination
     ) {
-        computeRouteHeadingBearing(currentLocation, primaryRoute, destination)
+        computeRouteHeadingBearing(displayDriverLocation, primaryRoute, destination)
     }
 
-    // Compute interpolated points along the route for pacing dots and road direction arrows
-    val routePacingPoints = remember(primaryRoute) {
-        computeInterpolatedRoutePoints(primaryRoute, stepMeters = 320.0)
-    }
-    val roadGuidanceArrows = remember(currentLocation.latitude, currentLocation.longitude, primaryRoute) {
-        computeRoadGuidanceArrows(currentLocation, primaryRoute)
-    }
-    val dottedApproachPoints = remember(currentLocation, nearestRouteAnchor) {
-        computeDottedApproachCurve(currentLocation, nearestRouteAnchor)
+    // Real-time live device orientation / compass sensor heading so rotating or moving the mobile
+    // immediately rotates the navigation arrow just like Google Maps
+    val liveArrowBearingDegrees = rememberLiveDeviceHeadingDegrees(
+        fallbackBearing = routeHeadingBearingDegrees,
+        gpsBearing = currentLocation.bearing,
+        gpsSpeedMps = currentLocation.speedMps
+    )
+
+    val roadGuidanceArrows = remember(displayDriverLocation.latitude, displayDriverLocation.longitude, primaryRoute) {
+        computeRoadGuidanceArrows(displayDriverLocation, primaryRoute)
     }
 
-    // Route midpoint callout positions for Best & Alternate Routes
+    // Straight, exact approach connector only if origin or destination pin is slightly off the street (6m..220m)
+    val originApproachPoints = remember(currentLocation, primaryRoute) {
+        val roadStart = primaryRoute?.points?.firstOrNull()
+        if (roadStart != null) {
+            val d = GeoUtils.haversineMeters(
+                currentLocation.latitude,
+                currentLocation.longitude,
+                roadStart.latitude,
+                roadStart.longitude
+            )
+            if (d in 6.0..220.0) listOf(currentLocation, roadStart) else emptyList()
+        } else {
+            emptyList()
+        }
+    }
+
+    val destinationApproachPoints = remember(destination, primaryRoute) {
+        val roadEnd = primaryRoute?.points?.lastOrNull()
+        if (destination != null && roadEnd != null) {
+            val destPt = LocationPoint(destination.latitude, destination.longitude)
+            val d = GeoUtils.haversineMeters(
+                destPt.latitude,
+                destPt.longitude,
+                roadEnd.latitude,
+                roadEnd.longitude
+            )
+            if (d in 6.0..220.0) listOf(roadEnd, destPt) else emptyList()
+        } else {
+            emptyList()
+        }
+    }
+
+    // Route midpoint callout position for active route
     val primaryMidpoint = remember(primaryRoute) {
         findRouteMidpoint(primaryRoute, fraction = 0.48)
-    }
-    val secondaryMidpoint = remember(secondaryRoute) {
-        findRouteMidpoint(secondaryRoute, fraction = 0.56)
     }
 
     val driverMarkerBitmap = remember(isNavigationMode) {
@@ -165,9 +238,6 @@ fun RoutePilotMapView(
     }
     val roadDirectionArrowBitmap = remember(isGreenTheme) {
         createRoadDirectionGuidanceArrowBitmap(isGreenTheme)
-    }
-    val pacingDotBitmap = remember(isGreenTheme) {
-        createRoutePacingDotBitmap(isGreenTheme)
     }
     val roadAnchorNodeBitmap = remember {
         createRoadEntryAnchorBitmap()
@@ -182,16 +252,6 @@ fun RoutePilotMapView(
             )
         }
     }
-    val altRouteCalloutBitmap = remember(secondaryRoute?.id, secondaryRoute?.durationMinutes) {
-        secondaryRoute?.let {
-            createRouteCalloutBadgeBitmap(
-                title = "Alt • ${it.durationMinutes} min",
-                subtitle = String.format(java.util.Locale.US, "%.1f km", it.distanceKm),
-                isPrimary = false,
-                isGreenTheme = false
-            )
-        }
-    }
     val criticalHazardBitmap = remember {
         createHazardTriangleBitmap(HazardRed.toArgb())
     }
@@ -199,42 +259,91 @@ fun RoutePilotMapView(
         createHazardTriangleBitmap(HazardOrange.toArgb())
     }
 
+    // Remembered MarkerState so the Google Maps Marker updates its position & rotation in real time
+    val driverMarkerState = remember {
+        MarkerState(position = LatLng(displayDriverLocation.latitude, displayDriverLocation.longitude))
+    }
+    driverMarkerState.position = LatLng(displayDriverLocation.latitude, displayDriverLocation.longitude)
+
+    val destinationMarkerState = remember {
+        MarkerState(
+            position = LatLng(
+                destination?.latitude ?: displayDriverLocation.latitude,
+                destination?.longitude ?: displayDriverLocation.longitude
+            )
+        )
+    }
+    if (destination != null) {
+        destinationMarkerState.position = LatLng(destination.latitude, destination.longitude)
+    }
+
     val cameraPositionState = rememberCameraPositionState {
         position = CameraPosition.Builder()
-            .target(LatLng(currentLocation.latitude, currentLocation.longitude))
+            .target(LatLng(displayDriverLocation.latitude, displayDriverLocation.longitude))
             .zoom(zoomLevel)
-            .bearing(if (isNavigationMode) headingBearingDegrees else 0f)
+            .bearing(if (isNavigationMode) routeHeadingBearingDegrees else 0f)
             .tilt(if (isNavigationMode) 45f else 0f)
             .build()
     }
 
+    // Only frame the camera when the route/destination/mode first changes or when the user explicitly taps
+    // the Recenter / My Location button. Never auto-reset when the user zooms in on a particular location!
     LaunchedEffect(
-        currentLocation.latitude,
-        currentLocation.longitude,
         destination?.id,
-        zoomLevel,
-        recenterTrigger,
-        isNavigationMode,
-        headingBearingDegrees
+        primaryRoute?.id,
+        isNavigationMode
     ) {
         runCatching {
-            val targetLatLng = if (!isNavigationMode && destination != null && primaryRoute != null) {
-                LatLng(
-                    (currentLocation.latitude + destination.latitude) / 2.0,
-                    (currentLocation.longitude + destination.longitude) / 2.0
+            if ((!isNavigationMode || isGreenTheme) && primaryRoute != null && primaryRoute.points.size >= 2) {
+                val boundsBuilder = LatLngBounds.builder()
+                primaryRoute.points.forEach { pt ->
+                    boundsBuilder.include(LatLng(pt.latitude, pt.longitude))
+                }
+                boundsBuilder.include(LatLng(currentLocation.latitude, currentLocation.longitude))
+                destination?.let {
+                    boundsBuilder.include(LatLng(it.latitude, it.longitude))
+                }
+                cameraPositionState.animate(
+                    CameraUpdateFactory.newLatLngBounds(boundsBuilder.build(), 130)
                 )
             } else {
-                LatLng(currentLocation.latitude, currentLocation.longitude)
+                val camPos = CameraPosition.Builder()
+                    .target(LatLng(displayDriverLocation.latitude, displayDriverLocation.longitude))
+                    .zoom(17.0f)
+                    .bearing(if (isNavigationMode) routeHeadingBearingDegrees else 0f)
+                    .tilt(if (isNavigationMode) 45f else 0f)
+                    .build()
+                cameraPositionState.animate(
+                    CameraUpdateFactory.newCameraPosition(camPos)
+                )
             }
-            val camPos = CameraPosition.Builder()
-                .target(targetLatLng)
-                .zoom(zoomLevel)
-                .bearing(if (isNavigationMode) headingBearingDegrees else 0f)
-                .tilt(if (isNavigationMode) 45f else 0f)
-                .build()
-            cameraPositionState.animate(
-                CameraUpdateFactory.newCameraPosition(camPos)
-            )
+        }
+    }
+
+    // Handle explicit Recenter / Compass button press
+    LaunchedEffect(recenterTrigger) {
+        if (recenterTrigger > 0) {
+            runCatching {
+                val targetZoom = if (isNavigationMode) max(cameraPositionState.position.zoom, 17.0f) else 15.0f
+                val camPos = CameraPosition.Builder()
+                    .target(LatLng(displayDriverLocation.latitude, displayDriverLocation.longitude))
+                    .zoom(targetZoom)
+                    .bearing(if (isNavigationMode) liveArrowBearingDegrees else 0f)
+                    .tilt(if (isNavigationMode) 45f else 0f)
+                    .build()
+                cameraPositionState.animate(
+                    CameraUpdateFactory.newCameraPosition(camPos)
+                )
+            }
+        }
+    }
+
+    // Handle explicit + / - zoom button presses at whatever location the user is currently viewing
+    LaunchedEffect(manualZoomTrigger) {
+        if (manualZoomTrigger > 0) {
+            runCatching {
+                cameraPositionState.animate(CameraUpdateFactory.zoomTo(zoomLevel))
+            }
         }
     }
 
@@ -246,89 +355,102 @@ fun RoutePilotMapView(
             cameraPositionState = cameraPositionState,
             properties = MapProperties(
                 mapType = if (isSatelliteMode) MapType.HYBRID else MapType.NORMAL,
-                isMyLocationEnabled = hasLocationPermission && !isNavigationMode,
+                isMyLocationEnabled = false,
                 isTrafficEnabled = false,
                 isBuildingEnabled = true
             ),
             uiSettings = MapUiSettings(
                 zoomControlsEnabled = false,
                 myLocationButtonEnabled = false,
-                compassEnabled = false
+                compassEnabled = false,
+                zoomGesturesEnabled = true,
+                scrollGesturesEnabled = true,
+                rotationGesturesEnabled = true,
+                tiltGesturesEnabled = true
             ),
             onMapClick = { latLng ->
                 onMapClick?.invoke(latLng.latitude, latLng.longitude)
             }
         ) {
-            // 1. Highlighted Alternate Route on Map Road (Outer Casing + Inner Slate-Blue Highlight)
-            if (secondaryRoute != null && secondaryRoute.points.size >= 2) {
-                val altPoints = secondaryRoute.points.map { LatLng(it.latitude, it.longitude) }
-                Polyline(
-                    points = altPoints,
-                    color = Color(0xFF475569),
-                    width = 22f,
-                    zIndex = 1.0f,
-                    clickable = onSelectAlternateRoute != null,
-                    onClick = { onSelectAlternateRoute?.invoke() }
-                )
-                Polyline(
-                    points = altPoints,
-                    color = Color(0xFF94A3B8),
-                    width = 14f,
-                    zIndex = 1.2f,
-                    clickable = onSelectAlternateRoute != null,
-                    onClick = { onSelectAlternateRoute?.invoke() }
-                )
-
-                if (!isNavigationMode && secondaryMidpoint != null && altRouteCalloutBitmap != null) {
-                    Marker(
-                        state = MarkerState(
-                            position = LatLng(secondaryMidpoint.latitude, secondaryMidpoint.longitude)
-                        ),
-                        anchor = Offset(0.5f, 1.0f),
-                        zIndex = 5.5f,
-                        icon = BitmapDescriptorFactory.fromBitmap(altRouteCalloutBitmap),
-                        onClick = {
-                            onSelectAlternateRoute?.invoke()
-                            true
-                        }
-                    )
-                }
-            }
-
-            // 2. Highlighted Best / Safer Active Route on Map Road (Glow + Casing + Core Highlight)
+            // 1. Highlighted Active Route on Exact Map Road (Casing + Core Highlight + Exact-Path Dotted Points)
             if (primaryRoute != null && primaryRoute.points.size >= 2) {
                 val routePoints = primaryRoute.points.map { LatLng(it.latitude, it.longitude) }
-                val outerGlowColor = if (isGreenTheme) {
-                    Color(0xFF22C55E).copy(alpha = 0.28f)
-                } else {
-                    Color(0xFF3B82F6).copy(alpha = 0.28f)
-                }
-                val outerCasingColor = if (isGreenTheme) Color(0xFF0F5132) else Color(0xFF1E3A8A)
-                val innerBandColor = if (isGreenTheme) Color(0xFF22C55E) else Color(0xFF2563EB)
+                val outerCasingColor = if (isGreenTheme) Color(0xFF0F5132) else Color(0xFF174EA6)
+                val innerBandColor = if (isGreenTheme) Color(0xFF16A34A) else Color(0xFF1A73E8)
+                val exactPathDotColor = if (isGreenTheme) Color(0xFFDCFCE7) else Color(0xFFE8F0FE)
 
-                // Soft road highlight glow
-                Polyline(
-                    points = routePoints,
-                    color = outerGlowColor,
-                    width = 34f,
-                    zIndex = 2.0f
-                )
-                // Crisp dark road edge casing
+                // Layer A: Crisp dark royal-blue / forest-green road edge casing on the exact street path
                 Polyline(
                     points = routePoints,
                     color = outerCasingColor,
-                    width = 24f,
+                    width = 26f,
+                    jointType = JointType.ROUND,
+                    startCap = RoundCap(),
+                    endCap = RoundCap(),
+                    geodesic = true,
                     zIndex = 2.5f
                 )
-                // Bright highlighted road core
+                // Layer B: Vibrant Google Maps blue / safer green road highlight on the exact street path
                 Polyline(
                     points = routePoints,
                     color = innerBandColor,
-                    width = 16f,
+                    width = 18f,
+                    jointType = JointType.ROUND,
+                    startCap = RoundCap(),
+                    endCap = RoundCap(),
+                    geodesic = true,
                     zIndex = 3.0f
                 )
+                // Layer C: Exact-path dotted highlight (continuous circular dots locked 100% onto the road centerline)
+                Polyline(
+                    points = routePoints,
+                    color = exactPathDotColor,
+                    width = 11f,
+                    pattern = listOf(Dot(), Gap(16f)),
+                    jointType = JointType.ROUND,
+                    geodesic = true,
+                    zIndex = 3.6f
+                )
 
-                // Best Route Callout Pill on Route Preview
+                // Anchor nodes at road start & road end (matching Google Maps endpoint circles)
+                val firstRoadPt = routePoints.first()
+                val lastRoadPt = routePoints.last()
+                Marker(
+                    state = MarkerState(position = firstRoadPt),
+                    anchor = Offset(0.5f, 0.5f),
+                    flat = true,
+                    zIndex = 4.2f,
+                    icon = BitmapDescriptorFactory.fromBitmap(roadAnchorNodeBitmap)
+                )
+                Marker(
+                    state = MarkerState(position = lastRoadPt),
+                    anchor = Offset(0.5f, 0.5f),
+                    flat = true,
+                    zIndex = 4.2f,
+                    icon = BitmapDescriptorFactory.fromBitmap(roadAnchorNodeBitmap)
+                )
+
+                // Straight dotted approach connector ONLY if start/destination pin is slightly off the street
+                if (originApproachPoints.size == 2) {
+                    Polyline(
+                        points = originApproachPoints.map { LatLng(it.latitude, it.longitude) },
+                        color = Color(0xFF1A73E8),
+                        width = 12f,
+                        pattern = listOf(Dot(), Gap(14f)),
+                        zIndex = 4.5f
+                    )
+                }
+                if (destinationApproachPoints.size == 2) {
+                    Polyline(
+                        points = destinationApproachPoints.map { LatLng(it.latitude, it.longitude) },
+                        color = Color(0xFF1A73E8),
+                        width = 12f,
+                        pattern = listOf(Dot(), Gap(14f)),
+                        zIndex = 4.5f
+                    )
+                }
+
+                // Route Callout Pill on Route Preview
                 if (!isNavigationMode && primaryMidpoint != null && bestRouteCalloutBitmap != null) {
                     Marker(
                         state = MarkerState(
@@ -340,38 +462,7 @@ fun RoutePilotMapView(
                     )
                 }
 
-                // Route Pacing Dots (white-ringed blue/green dots along the corridor)
-                routePacingPoints.forEach { pt ->
-                    Marker(
-                        state = MarkerState(position = LatLng(pt.latitude, pt.longitude)),
-                        anchor = Offset(0.5f, 0.5f),
-                        flat = true,
-                        zIndex = 4.0f,
-                        icon = BitmapDescriptorFactory.fromBitmap(pacingDotBitmap)
-                    )
-                }
-
-                // Dotted Approach Connector + Gray Anchor Node when starting/joining route
-                if (dottedApproachPoints.size >= 2 && nearestRouteAnchor != null) {
-                    Polyline(
-                        points = dottedApproachPoints.map { LatLng(it.latitude, it.longitude) },
-                        color = Color(0xFF64748B),
-                        width = 10f,
-                        pattern = listOf(Dot(), Gap(14f)),
-                        zIndex = 4.5f
-                    )
-                    Marker(
-                        state = MarkerState(
-                            position = LatLng(nearestRouteAnchor.latitude, nearestRouteAnchor.longitude)
-                        ),
-                        anchor = Offset(0.5f, 0.5f),
-                        flat = true,
-                        zIndex = 5.0f,
-                        icon = BitmapDescriptorFactory.fromBitmap(roadAnchorNodeBitmap)
-                    )
-                }
-
-                // Directional Guidance Arrows (White shaft arrow with dark navy/green border) on road
+                // Directional Guidance Arrows (White shaft arrow with dark navy/green border) flat on the road
                 roadGuidanceArrows.forEach { arrowSpec ->
                     Marker(
                         state = MarkerState(
@@ -386,7 +477,7 @@ fun RoutePilotMapView(
                 }
             }
 
-            // 3. Active Hazards (Warning Triangles + Radius Circles)
+            // 2. Active Hazards (Warning Triangles + Radius Circles indicated directly on the path)
             hazards.filter { it.isEffectiveHazard }.forEach { hazard ->
                 val isCrit = hazard.severity == HazardSeverity.CRITICAL ||
                     hazard.severity == HazardSeverity.HIGH
@@ -414,12 +505,10 @@ fun RoutePilotMapView(
                 )
             }
 
-            // 4. Destination Red Pin
+            // 3. Destination Red Pin
             if (destination != null) {
                 Marker(
-                    state = MarkerState(
-                        position = LatLng(destination.latitude, destination.longitude)
-                    ),
+                    state = destinationMarkerState,
                     title = destination.name,
                     snippet = destination.address,
                     zIndex = 7.0f,
@@ -427,15 +516,13 @@ fun RoutePilotMapView(
                 )
             }
 
-            // 5. Professional RoutePilot 3D Navigation Arrow Puck
+            // 4. Professional RoutePilot 3D Navigation Arrow Puck (rotates & moves with mobile sensor + GPS)
             Marker(
-                state = MarkerState(
-                    position = LatLng(currentLocation.latitude, currentLocation.longitude)
-                ),
+                state = driverMarkerState,
                 title = if (isNavigationMode) "Navigating" else "Your Location",
                 anchor = Offset(0.5f, 0.5f),
                 flat = true,
-                rotation = headingBearingDegrees,
+                rotation = liveArrowBearingDegrees,
                 zIndex = 10.0f,
                 icon = BitmapDescriptorFactory.fromBitmap(driverMarkerBitmap)
             )
@@ -533,7 +620,11 @@ fun RoutePilotMapView(
             ) {
                 Column(horizontalAlignment = Alignment.CenterHorizontally) {
                     IconButton(
-                        onClick = { zoomLevel = min(19f, zoomLevel + 1.0f) },
+                        onClick = {
+                            val currentZoom = cameraPositionState.position.zoom
+                            zoomLevel = min(21f, currentZoom + 1.0f)
+                            manualZoomTrigger++
+                        },
                         modifier = Modifier
                             .size(42.dp)
                             .testTag("map_btn_zoom_in")
@@ -551,7 +642,11 @@ fun RoutePilotMapView(
                             .background(Color(0xFFE2E8F0))
                     )
                     IconButton(
-                        onClick = { zoomLevel = max(5f, zoomLevel - 1.0f) },
+                        onClick = {
+                            val currentZoom = cameraPositionState.position.zoom
+                            zoomLevel = max(5f, currentZoom - 1.0f)
+                            manualZoomTrigger++
+                        },
                         modifier = Modifier
                             .size(42.dp)
                             .testTag("map_btn_zoom_out")
@@ -601,6 +696,151 @@ fun RoutePilotMapView(
                 )
             }
         }
+    }
+}
+
+/**
+ * Tracks real-time mobile orientation/rotation via Android's `SensorManager`
+ * (`TYPE_ROTATION_VECTOR`, `TYPE_GAME_ROTATION_VECTOR`, and `TYPE_ACCELEROMETER` + `TYPE_MAGNETIC_FIELD`)
+ * so that rotating or moving the mobile phone smoothly rotates the 3D Navigation Arrow just like Google Maps.
+ */
+@Composable
+private fun rememberLiveDeviceHeadingDegrees(
+    fallbackBearing: Float,
+    gpsBearing: Float,
+    gpsSpeedMps: Float
+): Float {
+    val context = LocalContext.current
+    var sensorAzimuth by remember { mutableFloatStateOf(Float.NaN) }
+
+    DisposableEffect(context) {
+        val sensorManager = context.getSystemService(Context.SENSOR_SERVICE) as? SensorManager
+        if (sensorManager == null) {
+            onDispose { }
+        } else {
+            val rotationVectorSensor = sensorManager.getDefaultSensor(Sensor.TYPE_ROTATION_VECTOR)
+            val gameRotationSensor = sensorManager.getDefaultSensor(Sensor.TYPE_GAME_ROTATION_VECTOR)
+            val accelerometer = sensorManager.getDefaultSensor(Sensor.TYPE_ACCELEROMETER)
+            val magnetometer = sensorManager.getDefaultSensor(Sensor.TYPE_MAGNETIC_FIELD)
+
+            val rotationMatrix = FloatArray(9)
+            val remappedMatrix = FloatArray(9)
+            val orientationAngles = FloatArray(3)
+            val gravity = FloatArray(3)
+            val geomagnetic = FloatArray(3)
+            var hasGravity = false
+            var hasGeomagnetic = false
+
+            val listener = object : SensorEventListener {
+                override fun onSensorChanged(event: SensorEvent) {
+                    var computedMatrix = false
+                    when (event.sensor.type) {
+                        Sensor.TYPE_ROTATION_VECTOR,
+                        Sensor.TYPE_GAME_ROTATION_VECTOR -> {
+                            SensorManager.getRotationMatrixFromVector(rotationMatrix, event.values)
+                            computedMatrix = true
+                        }
+                        Sensor.TYPE_ACCELEROMETER -> {
+                            System.arraycopy(event.values, 0, gravity, 0, min(3, event.values.size))
+                            hasGravity = true
+                            if (hasGeomagnetic) {
+                                computedMatrix = SensorManager.getRotationMatrix(
+                                    rotationMatrix,
+                                    null,
+                                    gravity,
+                                    geomagnetic
+                                )
+                            }
+                        }
+                        Sensor.TYPE_MAGNETIC_FIELD -> {
+                            System.arraycopy(event.values, 0, geomagnetic, 0, min(3, event.values.size))
+                            hasGeomagnetic = true
+                            if (hasGravity) {
+                                computedMatrix = SensorManager.getRotationMatrix(
+                                    rotationMatrix,
+                                    null,
+                                    gravity,
+                                    geomagnetic
+                                )
+                            }
+                        }
+                    }
+
+                    if (computedMatrix) {
+                        // Remap axes if phone is held upright (> 55 degrees tilt) to prevent gimbal lock
+                        val isUpright = abs(rotationMatrix[8]) < 0.55f
+                        if (isUpright) {
+                            SensorManager.remapCoordinateSystem(
+                                rotationMatrix,
+                                SensorManager.AXIS_X,
+                                SensorManager.AXIS_Z,
+                                remappedMatrix
+                            )
+                        } else {
+                            System.arraycopy(rotationMatrix, 0, remappedMatrix, 0, 9)
+                        }
+
+                        SensorManager.getOrientation(remappedMatrix, orientationAngles)
+                        val rawDeg = ((Math.toDegrees(orientationAngles[0].toDouble()) + 360.0) % 360.0).toFloat()
+
+                        if (sensorAzimuth.isNaN()) {
+                            sensorAzimuth = rawDeg
+                        } else {
+                            var delta = (rawDeg - sensorAzimuth) % 360f
+                            if (delta > 180f) delta -= 360f
+                            if (delta < -180f) delta += 360f
+                            if (abs(delta) >= 0.8f) {
+                                sensorAzimuth = ((sensorAzimuth + delta * 0.25f) + 360f) % 360f
+                            }
+                        }
+                    }
+                }
+
+                override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) = Unit
+            }
+
+            runCatching {
+                when {
+                    rotationVectorSensor != null -> {
+                        sensorManager.registerListener(
+                            listener,
+                            rotationVectorSensor,
+                            SensorManager.SENSOR_DELAY_GAME
+                        )
+                    }
+                    accelerometer != null && magnetometer != null -> {
+                        sensorManager.registerListener(
+                            listener,
+                            accelerometer,
+                            SensorManager.SENSOR_DELAY_GAME
+                        )
+                        sensorManager.registerListener(
+                            listener,
+                            magnetometer,
+                            SensorManager.SENSOR_DELAY_GAME
+                        )
+                    }
+                    gameRotationSensor != null -> {
+                        sensorManager.registerListener(
+                            listener,
+                            gameRotationSensor,
+                            SensorManager.SENSOR_DELAY_GAME
+                        )
+                    }
+                }
+            }
+
+            onDispose {
+                runCatching { sensorManager.unregisterListener(listener) }
+            }
+        }
+    }
+
+    return when {
+        gpsSpeedMps > 3.5f && gpsBearing != 0f -> gpsBearing
+        !sensorAzimuth.isNaN() -> sensorAzimuth
+        gpsBearing != 0f -> gpsBearing
+        else -> fallbackBearing
     }
 }
 
@@ -663,103 +903,53 @@ private fun findRouteMidpoint(route: Route?, fraction: Double): LocationPoint? {
 }
 
 /**
- * Finds the nearest point on the route polyline to anchor the dotted entry curve.
+ * Projects [currentLocation] onto the nearest segment of [route] so the driver arrow puck
+ * sits cleanly on the exact road centerline.
  */
-private fun findNearestRouteEntryPoint(
+private fun findNearestPointOnRoutePolyline(
     currentLocation: LocationPoint,
     route: Route?
 ): LocationPoint? {
     val pts = route?.points.orEmpty()
     if (pts.isEmpty()) return null
-    var nearest = pts.first()
+    if (pts.size == 1) return pts.first()
+
+    var bestPoint = pts.first()
     var minDist = Double.MAX_VALUE
-    for (pt in pts) {
-        val d = GeoUtils.haversineMeters(
-            currentLocation.latitude,
-            currentLocation.longitude,
-            pt.latitude,
-            pt.longitude
-        )
-        if (d < minDist) {
-            minDist = d
-            nearest = pt
-        }
-    }
-    return nearest
-}
 
-/**
- * Builds a smooth curved dotted connector between the driver's navigation puck and the road entry anchor.
- */
-private fun computeDottedApproachCurve(
-    currentLocation: LocationPoint,
-    anchorPoint: LocationPoint?
-): List<LocationPoint> {
-    if (anchorPoint == null) return emptyList()
-    val distMeters = GeoUtils.haversineMeters(
-        currentLocation.latitude,
-        currentLocation.longitude,
-        anchorPoint.latitude,
-        anchorPoint.longitude
-    )
-    val targetAnchor = if (distMeters < 18.0) {
-        LocationPoint(
-            latitude = currentLocation.latitude - 0.00038,
-            longitude = currentLocation.longitude - 0.00028
-        )
-    } else {
-        anchorPoint
-    }
-
-    val controlLat = (currentLocation.latitude + targetAnchor.latitude) / 2.0 + 0.00018
-    val controlLng = (currentLocation.longitude + targetAnchor.longitude) / 2.0 - 0.00016
-
-    val curve = mutableListOf<LocationPoint>()
-    val steps = 8
-    for (i in 0..steps) {
-        val t = i.toDouble() / steps
-        val oneMinusT = 1.0 - t
-        val lat = oneMinusT * oneMinusT * targetAnchor.latitude +
-            2 * oneMinusT * t * controlLat +
-            t * t * currentLocation.latitude
-        val lng = oneMinusT * oneMinusT * targetAnchor.longitude +
-            2 * oneMinusT * t * controlLng +
-            t * t * currentLocation.longitude
-        curve.add(LocationPoint(lat, lng))
-    }
-    return curve
-}
-
-/**
- * Computes evenly spaced pacing dot coordinates along the active route polyline.
- */
-private fun computeInterpolatedRoutePoints(
-    route: Route?,
-    stepMeters: Double
-): List<LocationPoint> {
-    val pts = route?.points.orEmpty()
-    if (pts.size < 2) return emptyList()
-    val result = mutableListOf<LocationPoint>()
-    var accumulated = 0.0
     for (i in 0 until pts.lastIndex) {
         val a = pts[i]
         val b = pts[i + 1]
-        val segDist = GeoUtils.haversineMeters(a.latitude, a.longitude, b.latitude, b.longitude)
-        if (segDist <= 1.0) continue
-        var cursor = stepMeters - accumulated
-        while (cursor <= segDist) {
-            val fraction = cursor / segDist
-            result.add(
-                LocationPoint(
-                    latitude = a.latitude + (b.latitude - a.latitude) * fraction,
-                    longitude = a.longitude + (b.longitude - a.longitude) * fraction
-                )
-            )
-            cursor += stepMeters
+        val projected = projectPointOntoSegment(currentLocation, a, b)
+        val d = GeoUtils.haversineMeters(
+            currentLocation.latitude,
+            currentLocation.longitude,
+            projected.latitude,
+            projected.longitude
+        )
+        if (d < minDist) {
+            minDist = d
+            bestPoint = projected
         }
-        accumulated = (accumulated + segDist) % stepMeters
     }
-    return result.take(40)
+    return bestPoint
+}
+
+private fun projectPointOntoSegment(
+    p: LocationPoint,
+    a: LocationPoint,
+    b: LocationPoint
+): LocationPoint {
+    val dx = b.longitude - a.longitude
+    val dy = b.latitude - a.latitude
+    val lenSq = dx * dx + dy * dy
+    if (lenSq < 1e-12) return a
+    val t = (((p.longitude - a.longitude) * dx + (p.latitude - a.latitude) * dy) / lenSq)
+        .coerceIn(0.0, 1.0)
+    return LocationPoint(
+        latitude = a.latitude + t * dy,
+        longitude = a.longitude + t * dx
+    )
 }
 
 /**
@@ -787,20 +977,31 @@ private fun computeRoadGuidanceArrows(
         }
     }
 
-    val specs = mutableListOf<RoadGuidanceArrowSpec>()
-    val stride = max(1, (pts.size - startIdx) / 5)
-    var idx = startIdx
-    while (idx < pts.lastIndex && specs.size < 5) {
+    // Collect candidate segments of sufficient length (>= 22m) so arrows lie cleanly on straight road sections
+    val candidateIndices = (startIdx until pts.lastIndex).filter { idx ->
         val a = pts[idx]
         val b = pts[idx + 1]
+        GeoUtils.haversineMeters(a.latitude, a.longitude, b.latitude, b.longitude) >= 22.0
+    }.ifEmpty {
+        (startIdx until pts.lastIndex).toList()
+    }
+
+    if (candidateIndices.isEmpty()) return emptyList()
+
+    val specs = mutableListOf<RoadGuidanceArrowSpec>()
+    val stride = max(1, candidateIndices.size / 4)
+    var cIdx = 0
+    while (cIdx < candidateIndices.size && specs.size < 4) {
+        val segIdx = candidateIndices[cIdx]
+        val a = pts[segIdx]
+        val b = pts[segIdx + 1]
         val bearing = calculateBearingDegrees(a.latitude, a.longitude, b.latitude, b.longitude)
-        val fraction = if (idx == startIdx) 0.35 else 0.50
         val arrowPos = LocationPoint(
-            latitude = a.latitude + (b.latitude - a.latitude) * fraction,
-            longitude = a.longitude + (b.longitude - a.longitude) * fraction
+            latitude = a.latitude + (b.latitude - a.latitude) * 0.5,
+            longitude = a.longitude + (b.longitude - a.longitude) * 0.5
         )
         specs.add(RoadGuidanceArrowSpec(position = arrowPos, bearingDegrees = bearing))
-        idx += stride
+        cIdx += stride
     }
     return specs
 }
@@ -815,36 +1016,37 @@ private fun computeRouteHeadingBearing(
     destination: Destination?
 ): Float {
     val pts = route?.points.orEmpty()
-    val targetPoint: LocationPoint? = if (pts.size >= 2) {
+    if (pts.size >= 2) {
         var nearestIdx = 0
         var minDist = Double.MAX_VALUE
-        for (i in pts.indices) {
+        for (i in 0 until pts.lastIndex) {
+            val proj = projectPointOntoSegment(currentLocation, pts[i], pts[i + 1])
             val d = GeoUtils.haversineMeters(
                 currentLocation.latitude,
                 currentLocation.longitude,
-                pts[i].latitude,
-                pts[i].longitude
+                proj.latitude,
+                proj.longitude
             )
             if (d < minDist) {
                 minDist = d
                 nearestIdx = i
             }
         }
-        val nextIdx = (nearestIdx + 1).coerceAtMost(pts.lastIndex)
-        if (nextIdx != nearestIdx) pts[nextIdx] else pts.last()
-    } else if (destination != null) {
-        LocationPoint(destination.latitude, destination.longitude)
-    } else {
-        null
+        val a = pts[nearestIdx]
+        val b = pts[(nearestIdx + 1).coerceAtMost(pts.lastIndex)]
+        if (GeoUtils.haversineMeters(a.latitude, a.longitude, b.latitude, b.longitude) > 1.0) {
+            return calculateBearingDegrees(a.latitude, a.longitude, b.latitude, b.longitude)
+        }
     }
-
-    if (targetPoint == null) return 0f
-    return calculateBearingDegrees(
-        currentLocation.latitude,
-        currentLocation.longitude,
-        targetPoint.latitude,
-        targetPoint.longitude
-    )
+    if (destination != null) {
+        return calculateBearingDegrees(
+            currentLocation.latitude,
+            currentLocation.longitude,
+            destination.latitude,
+            destination.longitude
+        )
+    }
+    return 0f
 }
 
 private fun calculateBearingDegrees(
@@ -924,7 +1126,7 @@ private fun createRouteCalloutBadgeBitmap(
  * Creates a bespoke, professional 3D RoutePilot Navigation Puck & Swept-Wing Fin Arrow.
  */
 private fun createProfessionalDriverMarkerBitmap(isNavigationMode: Boolean): Bitmap {
-    val sizePx = 164
+    val sizePx = 156
     val bmp = Bitmap.createBitmap(sizePx, sizePx, Bitmap.Config.ARGB_8888)
     val canvas = android.graphics.Canvas(bmp)
     val cx = sizePx / 2f
@@ -939,16 +1141,16 @@ private fun createProfessionalDriverMarkerBitmap(isNavigationMode: Boolean): Bit
 
     // 2. Frosted White Circular Puck
     val puckFillPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = android.graphics.Color.argb(242, 255, 255, 255)
+        color = android.graphics.Color.argb(244, 255, 255, 255)
         style = Paint.Style.FILL
     }
     canvas.drawCircle(cx, cy, sizePx * 0.38f, puckFillPaint)
 
     val puckBorderPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         color = if (isNavigationMode) {
-            Color(0xFFBFDBFE).toArgb()
+            Color(0xFF93C5FD).toArgb()
         } else {
-            Color(0xFFE2E8F0).toArgb()
+            Color(0xFFCBD5E1).toArgb()
         }
         style = Paint.Style.STROKE
         strokeWidth = 3.5f
@@ -1059,17 +1261,17 @@ private fun createProfessionalDriverMarkerBitmap(isNavigationMode: Boolean): Bit
  * that lies flat on the road polyline to indicate the direction of movement.
  */
 private fun createRoadDirectionGuidanceArrowBitmap(isGreenTheme: Boolean): Bitmap {
-    val w = 84
-    val h = 132
+    val w = 68
+    val h = 104
     val bmp = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
     val canvas = android.graphics.Canvas(bmp)
     val cx = w / 2f
 
-    val tipY = 10f
-    val headBaseY = 44f
-    val headHalfWidth = 24f
-    val shaftHalfWidth = 9.5f
-    val tailY = h - 14f
+    val tipY = 8f
+    val headBaseY = 36f
+    val headHalfWidth = 19f
+    val shaftHalfWidth = 7.5f
+    val tailY = h - 12f
 
     val arrowPath = android.graphics.Path().apply {
         moveTo(cx, tipY)
@@ -1091,7 +1293,7 @@ private fun createRoadDirectionGuidanceArrowBitmap(isGreenTheme: Boolean): Bitma
     val borderPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         color = outlineColor
         style = Paint.Style.STROKE
-        strokeWidth = 8f
+        strokeWidth = 6.5f
         strokeJoin = Paint.Join.ROUND
         strokeCap = Paint.Cap.ROUND
     }
@@ -1107,53 +1309,26 @@ private fun createRoadDirectionGuidanceArrowBitmap(isGreenTheme: Boolean): Bitma
 }
 
 /**
- * Creates the white-ringed blue/green pacing dot (`•`) placed periodically along the route corridor.
- */
-private fun createRoutePacingDotBitmap(isGreenTheme: Boolean): Bitmap {
-    val sizePx = 30
-    val bmp = Bitmap.createBitmap(sizePx, sizePx, Bitmap.Config.ARGB_8888)
-    val canvas = android.graphics.Canvas(bmp)
-    val c = sizePx / 2f
-
-    val outerWhite = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = android.graphics.Color.WHITE
-        style = Paint.Style.FILL
-    }
-    val innerFill = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = if (isGreenTheme) {
-            Color(0xFF16A34A).toArgb()
-        } else {
-            Color(0xFF1D4ED8).toArgb()
-        }
-        style = Paint.Style.FILL
-    }
-
-    canvas.drawCircle(c, c, 11f, outerWhite)
-    canvas.drawCircle(c, c, 7.5f, innerFill)
-    return bmp
-}
-
-/**
- * Creates the gray-bordered circular road anchor node where the dotted approach curve meets the road.
+ * Creates the white-centered circular road endpoint anchor node matching Google Maps.
  */
 private fun createRoadEntryAnchorBitmap(): Bitmap {
-    val sizePx = 48
+    val sizePx = 40
     val bmp = Bitmap.createBitmap(sizePx, sizePx, Bitmap.Config.ARGB_8888)
     val canvas = android.graphics.Canvas(bmp)
     val c = sizePx / 2f
 
     val fillPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = Color(0xFFCBD5E1).toArgb()
+        color = android.graphics.Color.WHITE
         style = Paint.Style.FILL
     }
     val strokePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = Color(0xFF64748B).toArgb()
+        color = Color(0xFF1E293B).toArgb()
         style = Paint.Style.STROKE
         strokeWidth = 5f
     }
 
-    canvas.drawCircle(c, c, 17f, fillPaint)
-    canvas.drawCircle(c, c, 17f, strokePaint)
+    canvas.drawCircle(c, c, 13f, fillPaint)
+    canvas.drawCircle(c, c, 13f, strokePaint)
     return bmp
 }
 

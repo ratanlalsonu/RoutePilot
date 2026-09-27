@@ -80,12 +80,12 @@
     <string name="status_warning">Caution Advised</string>
     <string name="status_cleared">Cleared</string>
     <string name="distance_ahead_format">%1$s ahead</string>
-    <string name="action_reroute_now">Find Safer Route</string>
+    <string name="action_reroute_now">Choose Other Path</string>
     <string name="action_dismiss">Dismiss</string>
 
     <!-- Recalculating Route Screen -->
-    <string name="title_recalculating_route">Recalculating Route...</string>
-    <string name="subtitle_recalculating_route">Finding a safer and optimal path for you</string>
+    <string name="title_recalculating_route">Switching to Other Path...</string>
+    <string name="subtitle_recalculating_route">Highlighting the safer alternate road path for you</string>
     <string name="action_cancel">Cancel</string>
     <string name="error_recalculation_failed">Unable to calculate a new route.</string>
     <string name="error_no_safe_route">No safe alternative route found.</string>
@@ -94,7 +94,7 @@
 
     <!-- Updated Route Screen -->
     <string name="banner_route_updated_title">Route Updated</string>
-    <string name="banner_route_updated_subtitle">A safer route has been selected.</string>
+    <string name="banner_route_updated_subtitle">New safer path highlighted on map.</string>
 
     <!-- Journey Completed Screen -->
     <string name="title_journey_completed">Journey Completed!</string>

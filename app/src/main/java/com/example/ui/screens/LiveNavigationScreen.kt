@@ -129,10 +129,10 @@ fun LiveNavigationScreen(
                     currentLocation = currentLocation,
                     destination = destination,
                     primaryRoute = activeRoute,
-                    secondaryRoute = if (isSaferRouteUpdated) previousRouteBeforeDiversion else null,
+                    secondaryRoute = null,
                     hazards = activeHazards,
                     isNavigationMode = true,
-                    isSaferGreenRoute = isSaferRouteUpdated,
+                    isSaferGreenRoute = isSaferRouteUpdated || (activeRoute?.isDivertedForSafety == true),
                     isMapsApiKeyConfigured = isMapsApiKeyConfigured,
                     hasLocationPermission = hasLocationPermission,
                     isVoiceMuted = isVoiceMuted,
@@ -344,7 +344,8 @@ private fun RouteUpdatedTopBanner() {
 
 /**
  * SCREEN 7 BOTTOM CARD — Displays Hazard Name, Hazard Type badge, Severity badge,
- * Distance Ahead, Road Status, and optional Admin description.
+ * Distance Ahead, Road Status, optional Admin description, and the explicit
+ * "Choose Other Path" action button.
  */
 @Composable
 private fun HazardAlertBottomCard(
@@ -384,7 +385,6 @@ private fun HazardAlertBottomCard(
         elevation = CardDefaults.cardElevation(defaultElevation = 10.dp),
         modifier = Modifier
             .fillMaxWidth()
-            .clickable { onFindSaferRoute() }
             .testTag("hazard_alert_bottom_card")
     ) {
         Column(modifier = Modifier.padding(16.dp)) {
@@ -397,7 +397,7 @@ private fun HazardAlertBottomCard(
                     contentDescription = hazardName,
                     contentScale = ContentScale.Crop,
                     modifier = Modifier
-                        .size(88.dp)
+                        .size(82.dp)
                         .clip(RoundedCornerShape(14.dp))
                 )
 
@@ -469,13 +469,7 @@ private fun HazardAlertBottomCard(
                     Spacer(modifier = Modifier.height(6.dp))
 
                     Text(
-                        text = distanceAheadText,
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = Color(0xFF334155)
-                    )
-
-                    Text(
-                        text = statusText,
+                        text = "$distanceAheadText • $statusText",
                         style = MaterialTheme.typography.bodyMedium.copy(
                             fontWeight = FontWeight.ExtraBold,
                             color = Color(0xFF0F172A)
@@ -491,6 +485,46 @@ private fun HazardAlertBottomCard(
                             maxLines = 2
                         )
                     }
+                }
+            }
+
+            Spacer(modifier = Modifier.height(14.dp))
+
+            // Prominent user action buttons: "Choose Other Path" and "Dismiss"
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                OutlinedButton(
+                    onClick = onDismiss,
+                    shape = RoundedCornerShape(14.dp),
+                    modifier = Modifier
+                        .weight(0.38f)
+                        .height(48.dp)
+                        .testTag("dismiss_hazard_button")
+                ) {
+                    Text(
+                        text = stringResource(R.string.action_dismiss),
+                        fontWeight = FontWeight.Bold,
+                        color = Color(0xFF475569)
+                    )
+                }
+
+                Button(
+                    onClick = onFindSaferRoute,
+                    shape = RoundedCornerShape(14.dp),
+                    colors = ButtonDefaults.buttonColors(containerColor = SafeRouteGreen),
+                    modifier = Modifier
+                        .weight(0.62f)
+                        .height(48.dp)
+                        .testTag("choose_other_path_button")
+                ) {
+                    Text(
+                        text = stringResource(R.string.action_reroute_now),
+                        fontWeight = FontWeight.ExtraBold,
+                        fontSize = 15.sp,
+                        color = Color.White
+                    )
                 }
             }
         }

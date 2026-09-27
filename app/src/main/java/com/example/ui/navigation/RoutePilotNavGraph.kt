@@ -225,6 +225,7 @@ fun RoutePilotAppRoot(
                         hasLocationPermission = uiState.hasLocationPermission,
                         useKilometers = uiState.preferences.useKilometers,
                         onSelectRouteOption = viewModel::selectRouteOptionInPreview,
+                        onChooseOtherPath = { viewModel.triggerAutomaticRerouting() },
                         onStartDriving = {
                             viewModel.startDrivingNavigation()
                             navController.navigate(RoutePilotRoutes.LIVE_NAVIGATION)

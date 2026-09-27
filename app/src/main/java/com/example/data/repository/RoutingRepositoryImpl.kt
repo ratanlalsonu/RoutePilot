@@ -18,7 +18,7 @@ class RoutingRepositoryImpl(
         destination: Destination,
         hazards: List<Hazard>,
         isRerouting: Boolean
-    ): RouteCalculationResult = withContext(Dispatchers.Default) {
+    ): RouteCalculationResult = withContext(Dispatchers.IO) {
         aStarEngine.calculateRoutes(
             origin = origin,
             destination = destination,

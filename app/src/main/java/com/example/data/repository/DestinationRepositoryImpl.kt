@@ -246,7 +246,13 @@ class DestinationRepositoryImpl(
             return@withContext Result.success(geocoderResults)
         }
 
-        // 3. Filter local gazetteer
+        // 3. Query Photon / Nominatim real-world POI search biased to currentLocation
+        val osmSearchResults = fetchPhotonOrNominatimPlaces(trimmed, currentLocation)
+        if (osmSearchResults.isNotEmpty()) {
+            return@withContext Result.success(osmSearchResults)
+        }
+
+        // 4. Filter local gazetteer
         val matched = realWorldGazetteer.filter {
             it.name.contains(trimmed, ignoreCase = true) ||
                 it.address.contains(trimmed, ignoreCase = true) ||
@@ -256,16 +262,18 @@ class DestinationRepositoryImpl(
         if (matched.isNotEmpty()) {
             Result.success(matched)
         } else {
+            val baseLat = currentLocation?.latitude ?: 25.4484
+            val baseLng = currentLocation?.longitude ?: 78.5685
             Result.success(
                 listOf(
                     Destination(
                         id = "search_custom_${trimmed.lowercase().replace(" ", "_")}",
                         name = trimmed.replaceFirstChar { it.uppercase() },
-                        address = "$trimmed, Main Highway Corridor",
+                        address = "$trimmed, Local Main Road",
                         category = "Destination",
-                        latitude = 25.4890,
-                        longitude = 78.6140,
-                        distanceFromUserKm = 11.4,
+                        latitude = baseLat + 0.0120,
+                        longitude = baseLng + 0.0140,
+                        distanceFromUserKm = 2.1,
                         isDemoSample = false
                     )
                 ) + defaultReferenceDestinations
@@ -350,6 +358,68 @@ class DestinationRepositoryImpl(
                         name = name,
                         address = address,
                         category = "Place",
+                        latitude = lat,
+                        longitude = lng,
+                        distanceFromUserKm = distKm,
+                        isDemoSample = false
+                    )
+                )
+            }
+            list
+        } catch (_: Exception) {
+            emptyList()
+        } finally {
+            connection?.disconnect()
+        }
+    }
+
+    private fun fetchPhotonOrNominatimPlaces(
+        query: String,
+        currentLocation: LocationPoint?
+    ): List<Destination> {
+        var connection: HttpURLConnection? = null
+        return try {
+            val encodedQuery = URLEncoder.encode(query, "UTF-8")
+            val biasParams = if (currentLocation != null) {
+                "&lat=${currentLocation.latitude}&lon=${currentLocation.longitude}"
+            } else ""
+            val urlStr = "https://photon.komoot.io/api/?q=$encodedQuery$biasParams&limit=6"
+            connection = (URL(urlStr).openConnection() as HttpURLConnection).apply {
+                requestMethod = "GET"
+                setRequestProperty("User-Agent", "RoutePilot-Driver-Android/1.0")
+                connectTimeout = 4500
+                readTimeout = 4500
+            }
+            if (connection.responseCode !in 200..299) return emptyList()
+            val body = connection.inputStream.bufferedReader().use { it.readText() }
+            val root = JSONObject(body)
+            val features = root.optJSONArray("features") ?: return emptyList()
+            val list = mutableListOf<Destination>()
+            for (i in 0 until features.length()) {
+                val feat = features.getJSONObject(i)
+                val geom = feat.optJSONObject("geometry")?.optJSONArray("coordinates") ?: continue
+                if (geom.length() < 2) continue
+                val lng = geom.optDouble(0, Double.NaN)
+                val lat = geom.optDouble(1, Double.NaN)
+                if (lat.isNaN() || lng.isNaN()) continue
+                val props = feat.optJSONObject("properties") ?: JSONObject()
+                val name = props.optString("name", "").ifBlank {
+                    props.optString("street", query)
+                }
+                val city = props.optString("city", props.optString("district", props.optString("state", "")))
+                val address = listOf(props.optString("street", ""), city, props.optString("country", ""))
+                    .filter { it.isNotBlank() }
+                    .joinToString(", ")
+                    .ifBlank { name }
+                val distKm = currentLocation?.let {
+                    GeoUtils.haversineMeters(it.latitude, it.longitude, lat, lng) / 1000.0
+                }
+                list.add(
+                    Destination(
+                        id = "osm_place_${lat}_${lng}_$i",
+                        name = name,
+                        address = address,
+                        category = props.optString("osm_value", "Place").replaceFirstChar { it.uppercase() },
                         latitude = lat,
                         longitude = lng,
                         distanceFromUserKm = distKm,
