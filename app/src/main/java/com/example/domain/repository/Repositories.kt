@@ -30,6 +30,9 @@ interface JourneyRepository {
 interface DestinationRepository {
     fun getRecentDestinations(includeDemoSamples: Boolean): Flow<List<Destination>>
     suspend fun saveRecentDestination(destination: Destination)
+    suspend fun deleteRecentDestination(destinationId: String)
+    suspend fun clearAllRecentDestinations()
+    suspend fun restoreDefaultRecentDestinations()
     suspend fun searchPlaces(
         query: String,
         currentLocation: LocationPoint?
@@ -62,7 +65,7 @@ data class DriverPreferences(
     val navigationVoiceEnabled: Boolean = true,
     val alertSoundEnabled: Boolean = true,
     val useKilometers: Boolean = true,
-    val operatingMode: OperatingMode = OperatingMode.DEMO,
+    val operatingMode: OperatingMode = OperatingMode.LIVE,
     val rememberMe: Boolean = true,
     val savedEmail: String = ""
 )

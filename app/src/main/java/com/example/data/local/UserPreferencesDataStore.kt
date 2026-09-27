@@ -31,17 +31,15 @@ class UserPreferencesDataStore(
     }
 
     override val preferencesFlow: Flow<DriverPreferences> = context.dataStore.data.map { prefs ->
-        val modeStr = prefs[Keys.OPERATING_MODE] ?: OperatingMode.DEMO.name
-        val mode = runCatching { OperatingMode.valueOf(modeStr) }.getOrDefault(OperatingMode.DEMO)
         DriverPreferences(
             languageCode = prefs[Keys.LANGUAGE] ?: "en",
             notificationsEnabled = prefs[Keys.NOTIFICATIONS] ?: true,
             navigationVoiceEnabled = prefs[Keys.NAV_VOICE] ?: true,
             alertSoundEnabled = prefs[Keys.ALERT_SOUND] ?: true,
             useKilometers = prefs[Keys.USE_KM] ?: true,
-            operatingMode = mode,
+            operatingMode = OperatingMode.LIVE,
             rememberMe = prefs[Keys.REMEMBER_ME] ?: true,
-            savedEmail = prefs[Keys.SAVED_EMAIL] ?: "driver@routepilot.in"
+            savedEmail = prefs[Keys.SAVED_EMAIL] ?: ""
         )
     }
 

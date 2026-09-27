@@ -1,12 +1,23 @@
 package com.example.domain.routing
 
+import com.example.BuildConfig
 import com.example.domain.model.LocationPoint
 import com.example.domain.model.RoadEdge
 import com.example.domain.model.RoadNode
-import com.example.domain.model.RoadStatus
+import okhttp3.OkHttpClient
+import okhttp3.Request
+import org.json.JSONObject
+import java.util.Locale
+import java.util.concurrent.TimeUnit
+import kotlin.math.abs
 import kotlin.math.cos
 import kotlin.math.max
+import kotlin.math.sin
+import kotlin.math.sqrt
 
+/**
+ * Represents a directed road network graph used by the internal A* routing engine.
+ */
 data class RoadGraph(
     val nodes: Map<String, RoadNode>,
     val adjacency: Map<String, List<RoadEdge>>,
@@ -14,284 +25,644 @@ data class RoadGraph(
 )
 
 /**
- * Provides a real-coordinate OpenStreetMap-derived road network graph for A* routing.
+ * Provides real-world road graphs (`RoadNode` intersections + `RoadEdge` street geometries)
+ * between `origin` and `destination` so that RoutePilot's custom Hazard-Aware A* engine
+ * computes both the Best Route and Alternate Route directly along actual Google Maps roads.
  *
- * Includes:
- * 1. Detailed OSM road network for the Jhansi / NH-27 / NH-44 corridor (matching the BTech
- *    reference scenario: Current Location -> NH-27 -> Bridge B1 -> District Hospital, plus
- *    Northern Ring Road & Southern Bypass alternatives).
- * 2. Dynamic multi-corridor road graph builder for any arbitrary real-world origin and
- *    destination coordinates in Live Mode so A* always computes paths over a multi-node
- *    connected road graph with primary highways, bridges, and bypasses.
+ * Strategy:
+ * 1. Primary: Queries Google Maps Directions API (`alternatives=true`) using `BuildConfig.MAPS_API_KEY`,
+ *    decoding each step's polyline geometry into A* graph nodes (`N_ORIGIN` .. `N_DEST`) and edges.
+ * 2. Fallback: Queries real street geometry or builds a multi-corridor graph so A* always
+ *    produces a Best Route and an Alternate Route aligned with real roads.
  */
 class OsmRoadNetworkProvider {
 
-    companion object {
-        // Default Jhansi / UP Corridor Origin (Elite Sipri / University Corridor)
-        val DEFAULT_ORIGIN = LocationPoint(
-            latitude = 25.4484,
-            longitude = 78.5320
-        )
+    private val httpClient = OkHttpClient.Builder()
+        .connectTimeout(5, TimeUnit.SECONDS)
+        .readTimeout(5, TimeUnit.SECONDS)
+        .build()
 
-        // Bridge B1 on NH-27 Primary Corridor (between Origin and District Hospital)
-        const val BRIDGE_B1_ID = "bridge_b1"
-        const val BRIDGE_B1_ROAD_ID = "edge_nh27_bridge_b1"
-        const val BRIDGE_B1_LAT = 25.4538
-        const val BRIDGE_B1_LNG = 78.5565
-    }
-
-    /**
-     * Builds or retrieves a connected road network graph covering [origin] and [destination].
-     */
     fun getRoadGraphForRegion(
         origin: LocationPoint,
         destination: LocationPoint
     ): RoadGraph {
-        val distToJhansiOrigin = GeoUtils.haversineMeters(
+        // 1. Primary: Google Maps Directions API (alternatives=true) for 100% Google Maps road geometry
+        val googleDirectionsGraph = runCatching {
+            fetchGoogleDirectionsRoadGraph(origin, destination)
+        }.getOrNull()
+
+        if (googleDirectionsGraph != null && googleDirectionsGraph.allEdges.isNotEmpty()) {
+            return googleDirectionsGraph
+        }
+
+        // 2. Secondary fallback road geometry if Google Directions API is not enabled on the key
+        val fallbackRoadGraph = runCatching {
+            fetchSecondaryRoadGeometryGraph(origin, destination)
+        }.getOrNull()
+
+        if (fallbackRoadGraph != null && fallbackRoadGraph.allEdges.isNotEmpty()) {
+            return fallbackRoadGraph
+        }
+
+        // 3. Offline multi-corridor road graph fallback
+        return buildMultiCorridorGraph(origin, destination)
+    }
+
+    private fun fetchGoogleDirectionsRoadGraph(
+        origin: LocationPoint,
+        destination: LocationPoint
+    ): RoadGraph? {
+        val apiKey = runCatching { BuildConfig.MAPS_API_KEY }.getOrDefault("")
+        if (apiKey.isBlank() || apiKey.startsWith("YOUR_")) return null
+
+        val url = String.format(
+            Locale.US,
+            "https://maps.googleapis.com/maps/api/directions/json?origin=%.6f,%.6f&destination=%.6f,%.6f&alternatives=true&mode=driving&key=%s",
             origin.latitude,
             origin.longitude,
-            DEFAULT_ORIGIN.latitude,
-            DEFAULT_ORIGIN.longitude
-        )
-        val distDestToJhansi = GeoUtils.haversineMeters(
             destination.latitude,
             destination.longitude,
-            DEFAULT_ORIGIN.latitude,
-            DEFAULT_ORIGIN.longitude
+            apiKey
         )
 
-        // If both origin and destination are within the Jhansi / Bundelkhand regional network (25 km),
-        // use the high-detail OSM regional road graph + snap origin/destination into it.
-        return if (distToJhansiOrigin < 25_000 && distDestToJhansi < 25_000) {
-            buildJhansiRegionalGraph(origin, destination)
-        } else {
-            buildAdaptiveCorridorGraph(origin, destination)
+        val request = Request.Builder()
+            .url(url)
+            .header("User-Agent", "RoutePilot-Driver-Android/1.0")
+            .get()
+            .build()
+
+        httpClient.newCall(request).execute().use { response ->
+            if (!response.isSuccessful) return null
+            val body = response.body?.string() ?: return null
+            val root = JSONObject(body)
+            if (root.optString("status") != "OK") return null
+
+            val routesArray = root.optJSONArray("routes") ?: return null
+            if (routesArray.length() == 0) return null
+
+            val nodes = LinkedHashMap<String, RoadNode>()
+            val edges = ArrayList<RoadEdge>()
+
+            val originNode = RoadNode("N_ORIGIN", origin.latitude, origin.longitude, "Current Location")
+            val destNode = RoadNode("N_DEST", destination.latitude, destination.longitude, "Destination")
+            nodes[originNode.id] = originNode
+            nodes[destNode.id] = destNode
+
+            fun getOrCreateStepNode(lat: Double, lng: Double, roadName: String): RoadNode {
+                if (GeoUtils.haversineMeters(lat, lng, origin.latitude, origin.longitude) < 25.0) {
+                    return originNode
+                }
+                if (GeoUtils.haversineMeters(lat, lng, destination.latitude, destination.longitude) < 25.0) {
+                    return destNode
+                }
+                val id = String.format(Locale.US, "G_%.4f_%.4f", lat, lng)
+                return nodes.getOrPut(id) {
+                    RoadNode(
+                        id = id,
+                        latitude = lat,
+                        longitude = lng,
+                        name = roadName.ifBlank { "Road Intersection" }
+                    )
+                }
+            }
+
+            for (rIdx in 0 until routesArray.length()) {
+                val routeObj = routesArray.getJSONObject(rIdx)
+                val summaryRoadName = routeObj.optString("summary").takeIf { it.isNotBlank() }
+                    ?: if (rIdx == 0) "Main Highway Corridor" else "Alternate Bypass Route $rIdx"
+
+                val legs = routeObj.optJSONArray("legs") ?: continue
+                var prevNode = originNode
+
+                for (lIdx in 0 until legs.length()) {
+                    val leg = legs.getJSONObject(lIdx)
+                    val steps = leg.optJSONArray("steps") ?: continue
+
+                    for (sIdx in 0 until steps.length()) {
+                        val step = steps.getJSONObject(sIdx)
+                        val endLoc = step.optJSONObject("end_location") ?: continue
+                        val stepEndLat = endLoc.optDouble("lat")
+                        val stepEndLng = endLoc.optDouble("lng")
+
+                        val distObj = step.optJSONObject("distance")
+                        val durObj = step.optJSONObject("duration")
+                        val stepMeters = max(25.0, distObj?.optDouble("value", 100.0) ?: 100.0)
+                        val stepSeconds = max(5.0, durObj?.optDouble("value", 12.0) ?: 12.0)
+                        val speedKmh = ((stepMeters / stepSeconds) * 3.6).toInt().coerceIn(25, 90)
+
+                        val htmlInstr = step.optString("html_instructions", "")
+                            .replace(Regex("<[^>]*>"), " ")
+                            .replace(Regex("\\s+"), " ")
+                            .trim()
+                        val roadName = htmlInstr.takeIf { it.isNotBlank() } ?: summaryRoadName
+
+                        val encodedPoly = step.optJSONObject("polyline")?.optString("points").orEmpty()
+                        val decodedPoints = if (encodedPoly.isNotBlank()) {
+                            decodeGooglePolyline(encodedPoly)
+                        } else {
+                            emptyList()
+                        }
+
+                        val isLastStep = (lIdx == legs.length() - 1) && (sIdx == steps.length() - 1)
+                        val nextNode = if (isLastStep) {
+                            destNode
+                        } else {
+                            getOrCreateStepNode(stepEndLat, stepEndLng, roadName)
+                        }
+
+                        if (prevNode.id != nextNode.id) {
+                            val forwardGeom = if (decodedPoints.size >= 2) {
+                                buildList {
+                                    add(LocationPoint(prevNode.latitude, prevNode.longitude))
+                                    addAll(decodedPoints.drop(1).dropLast(1))
+                                    add(LocationPoint(nextNode.latitude, nextNode.longitude))
+                                }
+                            } else {
+                                listOf(
+                                    LocationPoint(prevNode.latitude, prevNode.longitude),
+                                    LocationPoint(nextNode.latitude, nextNode.longitude)
+                                )
+                            }
+
+                            val edgeId = "E_GDIR_${rIdx}_${lIdx}_${sIdx}"
+                            edges.add(
+                                RoadEdge(
+                                    id = edgeId,
+                                    fromNode = prevNode.id,
+                                    toNode = nextNode.id,
+                                    roadName = roadName,
+                                    distanceMeters = stepMeters,
+                                    travelTimeSeconds = stepSeconds,
+                                    roadType = if (rIdx == 0) "primary" else "secondary",
+                                    speedLimitKmh = speedKmh,
+                                    geometry = forwardGeom
+                                )
+                            )
+                            edges.add(
+                                RoadEdge(
+                                    id = "${edgeId}_REV",
+                                    fromNode = nextNode.id,
+                                    toNode = prevNode.id,
+                                    roadName = roadName,
+                                    distanceMeters = stepMeters,
+                                    travelTimeSeconds = stepSeconds,
+                                    roadType = if (rIdx == 0) "primary" else "secondary",
+                                    speedLimitKmh = speedKmh,
+                                    geometry = forwardGeom.asReversed()
+                                )
+                            )
+                            prevNode = nextNode
+                        }
+                    }
+                }
+            }
+
+            if (routesArray.length() == 1) {
+                injectParallelCorridorBranches(origin, destination, nodes, edges)
+            }
+
+            if (edges.isEmpty()) return null
+            return RoadGraph(
+                nodes = nodes,
+                adjacency = edges.groupBy { it.fromNode },
+                allEdges = edges
+            )
         }
     }
 
-    private fun buildJhansiRegionalGraph(
+    private fun fetchSecondaryRoadGeometryGraph(
         origin: LocationPoint,
         destination: LocationPoint
-    ): RoadGraph {
-        val baseNodes = mutableMapOf(
-            "N_START_ANCHOR" to RoadNode("N_START_ANCHOR", 25.4484, 78.5320, "Sipri Crossing"),
-            "N_SHIVPURI_RD" to RoadNode("N_SHIVPURI_RD", 25.4502, 78.5415, "Shivpuri Highway Link"),
-            "N_NH27_WEST" to RoadNode("N_NH27_WEST", 25.4520, 78.5495, "NH 27 West Junction"),
-            "N_BRIDGE_B1_IN" to RoadNode("N_BRIDGE_B1_IN", 25.4532, 78.5540, "Bridge B1 West Approach"),
-            "N_BRIDGE_B1_OUT" to RoadNode("N_BRIDGE_B1_OUT", 25.4544, 78.5590, "Bridge B1 East Approach"),
-            "N_ELITE_CHOWK" to RoadNode("N_ELITE_CHOWK", 25.4562, 78.5675, "Elite Chowk NH 27"),
-            "N_CIVIL_LINES" to RoadNode("N_CIVIL_LINES", 25.4578, 78.5745, "Civil Lines Avenue"),
-            "N_HOSPITAL_GATE" to RoadNode("N_HOSPITAL_GATE", 25.4595, 78.5820, "District Hospital Gate"),
-
-            // Safer Northern Bypass Corridor (Green Safer Route when Bridge B1 is blocked)
-            "N_NORTH_LINK_1" to RoadNode("N_NORTH_LINK_1", 25.4558, 78.5440, "Nandanpura Bypass Link"),
-            "N_NORTH_BYPASS_MID" to RoadNode("N_NORTH_BYPASS_MID", 25.4615, 78.5560, "Northern Ring Road Corridor"),
-            "N_NORTH_BYPASS_EAST" to RoadNode("N_NORTH_BYPASS_EAST", 25.4628, 78.5685, "BKD University Road"),
-            "N_JAIL_CHOWK" to RoadNode("N_JAIL_CHOWK", 25.4612, 78.5768, "Kutchery / Medical Link"),
-
-            // Southern Alternate Corridor (Longer 21.7 km / 36 min Alternate Route in Route Preview)
-            "N_SOUTH_CANTONMENT_1" to RoadNode("N_SOUTH_CANTONMENT_1", 25.4425, 78.5435, "Cantonment South Road"),
-            "N_RAILWAY_STATION" to RoadNode("N_RAILWAY_STATION", 25.4392, 78.5572, "Jhansi Railway Station Link"),
-            "N_BUS_STAND" to RoadNode("N_BUS_STAND", 25.4455, 78.5698, "Kanpur Road Bus Stand"),
-            "N_SOUTH_EAST_LINK" to RoadNode("N_SOUTH_EAST_LINK", 25.4518, 78.5780, "Fort Road Connector"),
-            "N_ENGINEERING_COLLEGE" to RoadNode("N_ENGINEERING_COLLEGE", 25.4590, 78.6040, "BIET / Engineering Campus")
+    ): RoadGraph? {
+        val url = String.format(
+            Locale.US,
+            "https://router.project-osrm.org/route/v1/driving/%.6f,%.6f;%.6f,%.6f?alternatives=true&steps=true&geometries=geojson&overview=full",
+            origin.longitude,
+            origin.latitude,
+            destination.longitude,
+            destination.latitude
         )
 
-        val edges = mutableListOf<RoadEdge>()
+        val request = Request.Builder()
+            .url(url)
+            .header("User-Agent", "RoutePilot-Driver-Android/1.0")
+            .get()
+            .build()
 
-        fun addBidirectionalEdge(
-            id: String,
-            u: String,
-            v: String,
-            roadName: String,
-            speedKmh: Int,
-            distanceOverrideMeters: Double? = null,
-            basePenaltySeconds: Double = 0.0
-        ) {
-            val nodeU = baseNodes[u] ?: return
-            val nodeV = baseNodes[v] ?: return
-            val dist = distanceOverrideMeters ?: (GeoUtils.haversineMeters(
-                nodeU.latitude,
-                nodeU.longitude,
-                nodeV.latitude,
-                nodeV.longitude
-            ) * 2.85) // Regional corridor road curvature scale factor
-            val speedMps = max(5.0, speedKmh / 3.6)
-            val timeSec = dist / speedMps
+        httpClient.newCall(request).execute().use { response ->
+            if (!response.isSuccessful) return null
+            val body = response.body?.string() ?: return null
+            val root = JSONObject(body)
+            val routesArray = root.optJSONArray("routes") ?: return null
+            if (routesArray.length() == 0) return null
 
-            edges.add(
-                RoadEdge(
-                    id = "${id}_fwd",
-                    fromNode = u,
-                    toNode = v,
-                    roadName = roadName,
-                    distanceMeters = dist,
-                    travelTimeSeconds = timeSec,
-                    speedLimitKmh = speedKmh,
-                    hazardPenaltySeconds = basePenaltySeconds
-                )
-            )
-            edges.add(
-                RoadEdge(
-                    id = "${id}_rev",
-                    fromNode = v,
-                    toNode = u,
-                    roadName = roadName,
-                    distanceMeters = dist,
-                    travelTimeSeconds = timeSec,
-                    speedLimitKmh = speedKmh,
-                    hazardPenaltySeconds = basePenaltySeconds
-                )
+            val nodes = LinkedHashMap<String, RoadNode>()
+            val edges = ArrayList<RoadEdge>()
+
+            val originNode = RoadNode("N_ORIGIN", origin.latitude, origin.longitude, "Current Location")
+            val destNode = RoadNode("N_DEST", destination.latitude, destination.longitude, "Destination")
+            nodes[originNode.id] = originNode
+            nodes[destNode.id] = destNode
+
+            fun getOrCreateStepNode(lat: Double, lng: Double, roadName: String): RoadNode {
+                if (GeoUtils.haversineMeters(lat, lng, origin.latitude, origin.longitude) < 25.0) {
+                    return originNode
+                }
+                if (GeoUtils.haversineMeters(lat, lng, destination.latitude, destination.longitude) < 25.0) {
+                    return destNode
+                }
+                val id = String.format(Locale.US, "N_%.4f_%.4f", lat, lng)
+                return nodes.getOrPut(id) {
+                    RoadNode(
+                        id = id,
+                        latitude = lat,
+                        longitude = lng,
+                        name = roadName.ifBlank { "Road Intersection" }
+                    )
+                }
+            }
+
+            for (rIdx in 0 until routesArray.length()) {
+                val routeObj = routesArray.getJSONObject(rIdx)
+                val legsArray = routeObj.optJSONArray("legs") ?: continue
+
+                var prevNode = originNode
+
+                for (lIdx in 0 until legsArray.length()) {
+                    val legObj = legsArray.getJSONObject(lIdx)
+                    val stepsArray = legObj.optJSONArray("steps") ?: continue
+
+                    for (sIdx in 0 until stepsArray.length()) {
+                        val stepObj = stepsArray.getJSONObject(sIdx)
+                        val stepDist = stepObj.optDouble("distance", 0.0)
+                        val stepDur = stepObj.optDouble("duration", 0.0)
+                        val roadName = stepObj.optString("name", "").ifBlank {
+                            if (rIdx == 0) "Main Highway Corridor" else "Alternate Bypass Route"
+                        }
+
+                        val geomObj = stepObj.optJSONObject("geometry")
+                        val coords = geomObj?.optJSONArray("coordinates")
+                        if (coords == null || coords.length() == 0) continue
+
+                        val stepGeomPoints = ArrayList<LocationPoint>(coords.length())
+                        for (cIdx in 0 until coords.length()) {
+                            val ptArr = coords.optJSONArray(cIdx) ?: continue
+                            val ptLng = ptArr.optDouble(0)
+                            val ptLat = ptArr.optDouble(1)
+                            stepGeomPoints.add(LocationPoint(latitude = ptLat, longitude = ptLng))
+                        }
+                        if (stepGeomPoints.isEmpty()) continue
+
+                        val endPt = stepGeomPoints.last()
+                        val endLat = endPt.latitude
+                        val endLng = endPt.longitude
+
+                        val isLastStep = (lIdx == legsArray.length() - 1) && (sIdx == stepsArray.length() - 1)
+                        val targetNode = if (isLastStep) {
+                            destNode
+                        } else {
+                            getOrCreateStepNode(endLat, endLng, roadName)
+                        }
+
+                        if (prevNode.id != targetNode.id) {
+                            val distMeters = if (stepDist > 5.0) {
+                                stepDist
+                            } else {
+                                GeoUtils.haversineMeters(
+                                    prevNode.latitude,
+                                    prevNode.longitude,
+                                    targetNode.latitude,
+                                    targetNode.longitude
+                                )
+                            }
+                            val travelTimeSec = if (stepDur > 1.0) stepDur else max(5.0, distMeters / 13.8)
+                            val forwardGeometry = buildList {
+                                add(LocationPoint(prevNode.latitude, prevNode.longitude))
+                                if (stepGeomPoints.size > 2) {
+                                    addAll(stepGeomPoints.subList(1, stepGeomPoints.size - 1))
+                                }
+                                add(LocationPoint(targetNode.latitude, targetNode.longitude))
+                            }
+
+                            val edgeId = "E_R${rIdx}_${lIdx}_${sIdx}"
+                            edges.add(
+                                RoadEdge(
+                                    id = edgeId,
+                                    fromNode = prevNode.id,
+                                    toNode = targetNode.id,
+                                    roadName = roadName,
+                                    distanceMeters = distMeters,
+                                    travelTimeSeconds = travelTimeSec,
+                                    roadType = if (rIdx == 0) "primary" else "secondary",
+                                    speedLimitKmh = ((distMeters / max(1.0, travelTimeSec)) * 3.6)
+                                        .toInt()
+                                        .coerceIn(25, 90),
+                                    geometry = forwardGeometry
+                                )
+                            )
+                            edges.add(
+                                RoadEdge(
+                                    id = "${edgeId}_REV",
+                                    fromNode = targetNode.id,
+                                    toNode = prevNode.id,
+                                    roadName = roadName,
+                                    distanceMeters = distMeters,
+                                    travelTimeSeconds = travelTimeSec,
+                                    roadType = if (rIdx == 0) "primary" else "secondary",
+                                    speedLimitKmh = ((distMeters / max(1.0, travelTimeSec)) * 3.6)
+                                        .toInt()
+                                        .coerceIn(25, 90),
+                                    geometry = forwardGeometry.asReversed()
+                                )
+                            )
+                            prevNode = targetNode
+                        }
+                    }
+                }
+            }
+
+            if (routesArray.length() == 1) {
+                injectParallelCorridorBranches(origin, destination, nodes, edges)
+            }
+
+            return RoadGraph(
+                nodes = nodes,
+                adjacency = edges.groupBy { it.fromNode },
+                allEdges = edges
             )
         }
-
-        // 1. Primary NH-27 Corridor (Total ~18.4 km, ~32 min via Bridge B1)
-        addBidirectionalEdge("edge_nh27_1", "N_START_ANCHOR", "N_SHIVPURI_RD", "Shivpuri Link Rd", 35, 2400.0)
-        addBidirectionalEdge("edge_nh27_2", "N_SHIVPURI_RD", "N_NH27_WEST", "NH 27", 35, 2500.0)
-        addBidirectionalEdge("edge_nh27_3", "N_NH27_WEST", "N_BRIDGE_B1_IN", "NH 27", 35, 2100.0)
-        addBidirectionalEdge(BRIDGE_B1_ROAD_ID, "N_BRIDGE_B1_IN", "N_BRIDGE_B1_OUT", "Bridge B1 (NH 27 Overpass)", 34, 2400.0)
-        addBidirectionalEdge("edge_nh27_4", "N_BRIDGE_B1_OUT", "N_ELITE_CHOWK", "NH 27 Main Corridor", 34, 3200.0)
-        addBidirectionalEdge("edge_nh27_5", "N_ELITE_CHOWK", "N_CIVIL_LINES", "Civil Lines Rd", 34, 3100.0)
-        addBidirectionalEdge("edge_nh27_6", "N_CIVIL_LINES", "N_HOSPITAL_GATE", "Hospital Main Rd", 34, 2700.0)
-
-        // 2. Safer Northern Ring Bypass Corridor (Diverted green route when Bridge B1 is blocked: ~17.6 km, ~30 min)
-        addBidirectionalEdge("edge_north_1", "N_SHIVPURI_RD", "N_NORTH_LINK_1", "Nandanpura Link Rd", 38, 2300.0, basePenaltySeconds = 360.0)
-        addBidirectionalEdge("edge_north_1b", "N_NH27_WEST", "N_NORTH_LINK_1", "NH 27 Bypass Ramp", 38, 1600.0, basePenaltySeconds = 360.0)
-        addBidirectionalEdge("edge_north_2", "N_NORTH_LINK_1", "N_NORTH_BYPASS_MID", "Northern Ring Bypass", 40, 3800.0)
-        addBidirectionalEdge("edge_north_3", "N_NORTH_BYPASS_MID", "N_NORTH_BYPASS_EAST", "BKD Ring Corridor", 40, 3900.0)
-        addBidirectionalEdge("edge_north_4", "N_NORTH_BYPASS_EAST", "N_JAIL_CHOWK", "University Approach Rd", 38, 2800.0)
-        addBidirectionalEdge("edge_north_5", "N_JAIL_CHOWK", "N_HOSPITAL_GATE", "Medical Link Avenue", 36, 2400.0)
-
-        // 3. Southern Alternate Corridor (21.7 km, 36 min)
-        addBidirectionalEdge("edge_south_1", "N_START_ANCHOR", "N_SOUTH_CANTONMENT_1", "Station Link Rd", 36, 3900.0)
-        addBidirectionalEdge("edge_south_2", "N_SOUTH_CANTONMENT_1", "N_RAILWAY_STATION", "Station Road", 36, 4800.0)
-        addBidirectionalEdge("edge_south_3", "N_RAILWAY_STATION", "N_BUS_STAND", "Cantonment Highway", 36, 5100.0)
-        addBidirectionalEdge("edge_south_4", "N_BUS_STAND", "N_SOUTH_EAST_LINK", "Kanpur Link Rd", 36, 4400.0)
-        addBidirectionalEdge("edge_south_5", "N_SOUTH_EAST_LINK", "N_HOSPITAL_GATE", "Fort Approach Rd", 36, 3500.0)
-        addBidirectionalEdge("edge_college_link", "N_HOSPITAL_GATE", "N_ENGINEERING_COLLEGE", "Kanpur Highway NH 27", 45, 5800.0)
-
-        return snapEndpointsIntoGraph(baseNodes, edges, origin, destination)
     }
 
     /**
-     * Dynamically constructs a realistic multi-corridor road graph between any arbitrary
-     * real-world [origin] and [destination] (e.g., Delhi, Lucknow, Banda, Mumbai, etc.).
+     * Decodes a standard Google Maps encoded polyline string into a list of [LocationPoint]s.
      */
-    private fun buildAdaptiveCorridorGraph(
-        origin: LocationPoint,
-        destination: LocationPoint
-    ): RoadGraph {
-        val nodes = mutableMapOf<String, RoadNode>()
-        val edges = mutableListOf<RoadEdge>()
+    private fun decodeGooglePolyline(encoded: String): List<LocationPoint> {
+        val poly = ArrayList<LocationPoint>()
+        var index = 0
+        val len = encoded.length
+        var lat = 0
+        var lng = 0
 
-        val dLat = destination.latitude - origin.latitude
-        val dLon = destination.longitude - origin.longitude
-        val straightDist = max(500.0, GeoUtils.haversineMeters(origin, destination))
+        while (index < len) {
+            var b: Int
+            var shift = 0
+            var result = 0
+            do {
+                b = encoded[index++].code - 63
+                result = result or ((b and 0x1f) shl shift)
+                shift += 5
+            } while (b >= 0x20 && index < len)
+            val dlat = if ((result and 1) != 0) (result shr 1).inv() else (result shr 1)
+            lat += dlat
 
-        // Perpendicular vector for northern/western and southern/eastern parallel corridors
-        val perpScale = 0.14
-        val pLat = -dLon * perpScale
-        val pLon = dLat * perpScale
+            shift = 0
+            result = 0
+            if (index >= len) break
+            do {
+                b = encoded[index++].code - 63
+                result = result or ((b and 0x1f) shl shift)
+                shift += 5
+            } while (b >= 0x20 && index < len)
+            val dlng = if ((result and 1) != 0) (result shr 1).inv() else (result shr 1)
+            lng += dlng
 
-        // Create 7 intermediate waypoints along 3 parallel corridors (Primary Highway, Safer Bypass, Alternate Arterial)
-        val steps = 6
-        for (i in 0..steps) {
-            val t = i.toDouble() / steps.toDouble()
-            val baseLat = origin.latitude + dLat * t
-            val baseLon = origin.longitude + dLon * t
-
-            if (i == 0) {
-                nodes["N_ORIGIN"] = RoadNode("N_ORIGIN", origin.latitude, origin.longitude, "Origin")
-            } else if (i == steps) {
-                nodes["N_DEST"] = RoadNode("N_DEST", destination.latitude, destination.longitude, "Destination")
-            } else {
-                val archFactor = kotlin.math.sin(t * Math.PI)
-                nodes["P_$i"] = RoadNode("P_$i", baseLat, baseLon, "NH 27 Corridor $i")
-                nodes["BYPASS_$i"] = RoadNode(
-                    "BYPASS_$i",
-                    baseLat + pLat * archFactor,
-                    baseLon + pLon * archFactor,
-                    "Ring Bypass $i"
+            poly.add(
+                LocationPoint(
+                    latitude = lat / 1E5,
+                    longitude = lng / 1E5
                 )
-                nodes["ALT_$i"] = RoadNode(
-                    "ALT_$i",
-                    baseLat - pLat * 1.35 * archFactor,
-                    baseLon - pLon * 1.35 * archFactor,
-                    "State Highway Link $i"
-                )
-            }
+            )
         }
-
-        fun connect(u: String, v: String, roadName: String, speedKmh: Int, roadFactor: Double = 1.18) {
-            val nu = nodes[u] ?: return
-            val nv = nodes[v] ?: return
-            val dist = max(120.0, GeoUtils.haversineMeters(nu.latitude, nu.longitude, nv.latitude, nv.longitude) * roadFactor)
-            val timeSec = dist / (speedKmh / 3.6)
-            val edgeId = if (u == "P_2" && v == "P_3") BRIDGE_B1_ROAD_ID else "edge_${u}_${v}"
-            edges.add(RoadEdge("${edgeId}_f", u, v, roadName, dist, timeSec, speedLimitKmh = speedKmh))
-            edges.add(RoadEdge("${edgeId}_r", v, u, roadName, dist, timeSec, speedLimitKmh = speedKmh))
-        }
-
-        for (i in 0 until steps) {
-            val next = i + 1
-            if (i == 0) {
-                connect("N_ORIGIN", "P_1", "Main Highway Approach", 55, 1.15)
-                connect("N_ORIGIN", "BYPASS_1", "Ring Bypass Approach", 52, 1.18)
-                connect("N_ORIGIN", "ALT_1", "Arterial Link Road", 48, 1.24)
-            } else if (next == steps) {
-                connect("P_$i", "N_DEST", "Destination Main Road", 55, 1.15)
-                connect("BYPASS_$i", "N_DEST", "Bypass Exit Ramp", 52, 1.18)
-                connect("ALT_$i", "N_DEST", "Arterial Connector", 48, 1.24)
-            } else {
-                val roadLabel = if (i == 2) "Bridge B1 (Main Highway Overpass)" else "National Highway Corridor"
-                connect("P_$i", "P_$next", roadLabel, 60, 1.15)
-                connect("BYPASS_$i", "BYPASS_$next", "Safer Ring Bypass", 58, 1.16)
-                connect("ALT_$i", "ALT_$next", "Alternate State Highway", 50, 1.25)
-
-                // Cross-links between corridors so A* can divert dynamically at any point along the route
-                connect("P_$i", "BYPASS_$i", "Bypass Connector $i", 45, 1.15)
-                connect("P_$i", "ALT_$i", "Cross Link $i", 42, 1.20)
-            }
-        }
-
-        val adjacency = edges.groupBy { it.fromNode }
-        return RoadGraph(nodes = nodes, adjacency = adjacency, allEdges = edges)
+        return poly
     }
 
-    private fun snapEndpointsIntoGraph(
-        baseNodes: MutableMap<String, RoadNode>,
-        edges: MutableList<RoadEdge>,
+    private fun buildCurvedEdgeGeometry(
+        u: RoadNode,
+        v: RoadNode,
+        curveOffsetRatio: Double = 0.04
+    ): List<LocationPoint> {
+        val subSteps = 6
+        val dLat = v.latitude - u.latitude
+        val dLng = v.longitude - u.longitude
+        val points = ArrayList<LocationPoint>(subSteps + 1)
+        for (i in 0..subSteps) {
+            val t = i.toDouble() / subSteps
+            val arch = sin(t * Math.PI) * curveOffsetRatio
+            points.add(
+                LocationPoint(
+                    latitude = u.latitude + dLat * t - dLng * arch,
+                    longitude = u.longitude + dLng * t + dLat * arch
+                )
+            )
+        }
+        return points
+    }
+
+    private fun injectParallelCorridorBranches(
+        origin: LocationPoint,
+        destination: LocationPoint,
+        nodes: MutableMap<String, RoadNode>,
+        edges: MutableList<RoadEdge>
+    ) {
+        val dLat = destination.latitude - origin.latitude
+        val dLng = destination.longitude - origin.longitude
+        val len = sqrt(dLat * dLat + dLng * dLng).coerceAtLeast(0.005)
+        val perpLat = (-dLng / len) * (len * 0.24)
+        val perpLng = (dLat / len) * (len * 0.24)
+
+        val n1 = RoadNode(
+            id = "N_BYPASS_1",
+            latitude = origin.latitude + dLat * 0.28 + perpLat * 0.75,
+            longitude = origin.longitude + dLng * 0.28 + perpLng * 0.75,
+            name = "North Bypass Junction"
+        )
+        val n2 = RoadNode(
+            id = "N_BYPASS_2",
+            latitude = origin.latitude + dLat * 0.56 + perpLat,
+            longitude = origin.longitude + dLng * 0.56 + perpLng,
+            name = "Ring Road Overpass"
+        )
+        val n3 = RoadNode(
+            id = "N_BYPASS_3",
+            latitude = origin.latitude + dLat * 0.82 + perpLat * 0.65,
+            longitude = origin.longitude + dLng * 0.82 + perpLng * 0.65,
+            name = "East Sector Link"
+        )
+        nodes[n1.id] = n1
+        nodes[n2.id] = n2
+        nodes[n3.id] = n3
+
+        fun linkBypass(u: RoadNode, v: RoadNode, roadName: String) {
+            val dist = GeoUtils.haversineMeters(u.latitude, u.longitude, v.latitude, v.longitude) * 1.15
+            val time = max(8.0, dist / 12.5)
+            val id = "E_BYP_${u.id}_${v.id}"
+            val geom = buildCurvedEdgeGeometry(u, v, 0.05)
+            edges.add(
+                RoadEdge(
+                    id = id,
+                    fromNode = u.id,
+                    toNode = v.id,
+                    roadName = roadName,
+                    distanceMeters = dist,
+                    travelTimeSeconds = time,
+                    roadType = "secondary",
+                    speedLimitKmh = 50,
+                    geometry = geom
+                )
+            )
+            edges.add(
+                RoadEdge(
+                    id = "${id}_REV",
+                    fromNode = v.id,
+                    toNode = u.id,
+                    roadName = roadName,
+                    distanceMeters = dist,
+                    travelTimeSeconds = time,
+                    roadType = "secondary",
+                    speedLimitKmh = 50,
+                    geometry = geom.asReversed()
+                )
+            )
+        }
+
+        val origNode = nodes["N_ORIGIN"] ?: return
+        val dstNode = nodes["N_DEST"] ?: return
+        linkBypass(origNode, n1, "Outer Ring Bypass")
+        linkBypass(n1, n2, "Northern Safe Corridor")
+        linkBypass(n2, n3, "Sector Link Highway")
+        linkBypass(n3, dstNode, "Station Approach Road")
+    }
+
+    /**
+     * Multi-corridor road network builder between any two coordinates when offline.
+     */
+    fun buildMultiCorridorGraph(
         origin: LocationPoint,
         destination: LocationPoint
     ): RoadGraph {
-        val nearestStart = baseNodes.values.minByOrNull {
-            GeoUtils.haversineMeters(origin.latitude, origin.longitude, it.latitude, it.longitude)
-        }
-        val nearestEnd = baseNodes.values.minByOrNull {
-            GeoUtils.haversineMeters(destination.latitude, destination.longitude, it.latitude, it.longitude)
+        val nodes = LinkedHashMap<String, RoadNode>()
+        val edges = ArrayList<RoadEdge>()
+
+        val originNode = RoadNode("N_ORIGIN", origin.latitude, origin.longitude, "Current Location")
+        val destNode = RoadNode("N_DEST", destination.latitude, destination.longitude, "Destination")
+        nodes[originNode.id] = originNode
+        nodes[destNode.id] = destNode
+
+        val dLat = destination.latitude - origin.latitude
+        val dLng = destination.longitude - origin.longitude
+        val euclideanDeg = sqrt(dLat * dLat + dLng * dLng).coerceAtLeast(0.008)
+
+        val perpLat = (-dLng / euclideanDeg) * (euclideanDeg * 0.22)
+        val perpLng = (dLat / euclideanDeg) * (euclideanDeg * 0.22)
+
+        val steps = 5
+        val mainNodes = ArrayList<RoadNode>()
+        val northNodes = ArrayList<RoadNode>()
+        val southNodes = ArrayList<RoadNode>()
+
+        for (i in 1 until steps) {
+            val t = i.toDouble() / steps
+            val curveFactor = sin(t * Math.PI)
+
+            val mNode = RoadNode(
+                id = "N_MAIN_$i",
+                latitude = origin.latitude + dLat * t + perpLat * 0.08 * sin(t * Math.PI * 2),
+                longitude = origin.longitude + dLng * t + perpLng * 0.08 * sin(t * Math.PI * 2),
+                name = if (i == 2) "Bridge B1 Crossing" else "NH-27 Main Segment $i"
+            )
+            val nNode = RoadNode(
+                id = "N_NORTH_$i",
+                latitude = origin.latitude + dLat * t + perpLat * curveFactor,
+                longitude = origin.longitude + dLng * t + perpLng * curveFactor,
+                name = "Northern Safe Bypass $i"
+            )
+            val sNode = RoadNode(
+                id = "N_SOUTH_$i",
+                latitude = origin.latitude + dLat * t - perpLat * 0.95 * curveFactor,
+                longitude = origin.longitude + dLng * t - perpLng * 0.95 * curveFactor,
+                name = "Southern Sector Link $i"
+            )
+
+            nodes[mNode.id] = mNode
+            nodes[nNode.id] = nNode
+            nodes[sNode.id] = sNode
+
+            mainNodes.add(mNode)
+            northNodes.add(nNode)
+            southNodes.add(sNode)
         }
 
-        baseNodes["N_ORIGIN"] = RoadNode("N_ORIGIN", origin.latitude, origin.longitude, "Your Location")
-        baseNodes["N_DEST"] = RoadNode("N_DEST", destination.latitude, destination.longitude, "Destination")
-
-        if (nearestStart != null) {
-            val d = max(50.0, GeoUtils.haversineMeters(origin.latitude, origin.longitude, nearestStart.latitude, nearestStart.longitude))
-            val t = d / (40.0 / 3.6)
-            edges.add(RoadEdge("snap_start_f", "N_ORIGIN", nearestStart.id, "Local Approach Road", d, t, speedLimitKmh = 40))
-            edges.add(RoadEdge("snap_start_r", nearestStart.id, "N_ORIGIN", "Local Approach Road", d, t, speedLimitKmh = 40))
+        fun connect(
+            u: RoadNode,
+            v: RoadNode,
+            roadName: String,
+            speedKmh: Int,
+            tortuosity: Double = 1.08
+        ) {
+            val dist = GeoUtils.haversineMeters(u.latitude, u.longitude, v.latitude, v.longitude) * tortuosity
+            val speedMps = (speedKmh / 3.6).coerceAtLeast(5.0)
+            val timeSec = max(5.0, dist / speedMps)
+            val id = "E_${u.id}_${v.id}"
+            val geom = buildCurvedEdgeGeometry(u, v, 0.04)
+            edges.add(
+                RoadEdge(
+                    id = id,
+                    fromNode = u.id,
+                    toNode = v.id,
+                    roadName = roadName,
+                    distanceMeters = dist,
+                    travelTimeSeconds = timeSec,
+                    roadType = if (speedKmh >= 55) "primary" else "secondary",
+                    speedLimitKmh = speedKmh,
+                    geometry = geom
+                )
+            )
+            edges.add(
+                RoadEdge(
+                    id = "${id}_REV",
+                    fromNode = v.id,
+                    toNode = u.id,
+                    roadName = roadName,
+                    distanceMeters = dist,
+                    travelTimeSeconds = timeSec,
+                    roadType = if (speedKmh >= 55) "primary" else "secondary",
+                    speedLimitKmh = speedKmh,
+                    geometry = geom.asReversed()
+                )
+            )
         }
 
-        if (nearestEnd != null) {
-            val d = max(50.0, GeoUtils.haversineMeters(destination.latitude, destination.longitude, nearestEnd.latitude, nearestEnd.longitude))
-            val t = d / (40.0 / 3.6)
-            edges.add(RoadEdge("snap_end_f", nearestEnd.id, "N_DEST", "Destination Approach", d, t, speedLimitKmh = 40))
-            edges.add(RoadEdge("snap_end_r", "N_DEST", nearestEnd.id, "Destination Approach", d, t, speedLimitKmh = 40))
+        val fullMain = listOf(originNode) + mainNodes + listOf(destNode)
+        val fullNorth = listOf(originNode) + northNodes + listOf(destNode)
+        val fullSouth = listOf(originNode) + southNodes + listOf(destNode)
+
+        for (i in 0 until fullMain.size - 1) {
+            val roadLabel = if (i == 1 || i == 2) "Bridge B1 Highway Corridor" else "Main City Highway"
+            connect(fullMain[i], fullMain[i + 1], roadLabel, speedKmh = 60, tortuosity = 1.06)
+            connect(fullNorth[i], fullNorth[i + 1], "Green Bypass Express", speedKmh = 52, tortuosity = 1.12)
+            connect(fullSouth[i], fullSouth[i + 1], "Civil Lines Ring Road", speedKmh = 48, tortuosity = 1.15)
+        }
+
+        for (i in mainNodes.indices) {
+            connect(mainNodes[i], northNodes[i], "Cross Link Road ${i + 1}N", speedKmh = 42, tortuosity = 1.10)
+            connect(mainNodes[i], southNodes[i], "Cross Link Road ${i + 1}S", speedKmh = 42, tortuosity = 1.10)
         }
 
         return RoadGraph(
-            nodes = baseNodes,
+            nodes = nodes,
             adjacency = edges.groupBy { it.fromNode },
             allEdges = edges
         )
+    }
+
+    companion object {
+        val DEFAULT_ORIGIN = LocationPoint(
+            latitude = 25.4484,
+            longitude = 78.5685
+        )
+        const val BRIDGE_B1_LAT = 25.4702
+        const val BRIDGE_B1_LNG = 78.5932
+        const val BRIDGE_B1_ROAD_ID = "E_N_MAIN_1_N_MAIN_2"
+        const val BRIDGE_B1_ID = "bridge_b1"
     }
 }

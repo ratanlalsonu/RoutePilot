@@ -3,9 +3,7 @@ package com.example.ui.screens
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
-import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -21,8 +19,6 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBars
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.windowInsetsPadding
-import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.CheckCircle
@@ -64,7 +60,6 @@ import com.example.domain.model.Hazard
 import com.example.domain.model.HazardSeverity
 import com.example.domain.model.HazardStatus
 import com.example.domain.model.LocationPoint
-import com.example.domain.model.OperatingMode
 import com.example.domain.model.Route
 import com.example.domain.routing.GeoUtils
 import com.example.ui.components.RoutePilotMapView
@@ -77,16 +72,15 @@ import com.example.ui.theme.SafeRouteGreen
 import com.example.ui.viewmodel.NavigationWorkflowState
 
 /**
- * Covers SCREENS 6, 7, 8, and 9 of the RoutePilot Driver Flow:
+ * Covers SCREENS 6, 7, 8, and 9 in pure Live Mode:
  * - Screen 6: Live Driving / Navigation (Dark Navy Turn Banner + Map + Remaining/ETA/End Card)
- * - Screen 7: Hazard Alert During Driving (Red Hazard Banner + Bridge B1 Critical Card)
+ * - Screen 7: Hazard Alert During Driving (Red Hazard Banner + Hazard Card showing Name, Hazard Type, Severity, Distance Ahead, and Road Status)
  * - Screen 8: Recalculating Route (Clean full-screen Car/Route Refresh + Progress Bar + Cancel)
  * - Screen 9: New Safer Route Shown (Green "Route Updated" Banner + Green Polyline + Remaining/ETA/End Card)
  */
 @Composable
 fun LiveNavigationScreen(
     workflowState: NavigationWorkflowState,
-    operatingMode: OperatingMode,
     currentLocation: LocationPoint,
     destination: Destination,
     activeRoute: Route?,
@@ -105,11 +99,9 @@ fun LiveNavigationScreen(
     useKilometers: Boolean,
     isVoiceMuted: Boolean,
     onToggleVoiceMute: () -> Unit,
-    onTriggerDemoHazard: () -> Unit,
     onDismissHazardAlert: () -> Unit,
     onTriggerRerouteNow: () -> Unit,
     onCancelRecalculation: () -> Unit,
-    onArriveAtDestination: () -> Unit,
     onEndNavigation: () -> Unit
 ) {
     AnimatedContent(
@@ -117,7 +109,6 @@ fun LiveNavigationScreen(
         label = "nav_recalculating_transition"
     ) { isRecalculatingScreen ->
         if (isRecalculatingScreen) {
-            // SCREEN 8 — RECALCULATING ROUTE
             RecalculatingRouteView(
                 progress = recalculationProgress,
                 errorMessage = recalculationErrorMessage,
@@ -126,7 +117,6 @@ fun LiveNavigationScreen(
                 onEndNavigation = onEndNavigation
             )
         } else {
-            // SCREENS 6, 7, and 9 — MAP + TOP BANNER + BOTTOM CARD
             val isHazardDetected = workflowState == NavigationWorkflowState.HAZARD_DETECTED
             val isSaferRouteUpdated = workflowState == NavigationWorkflowState.ROUTE_UPDATED
 
@@ -151,25 +141,20 @@ fun LiveNavigationScreen(
                     modifier = Modifier.fillMaxSize()
                 )
 
-                // Top Banner Overlay (Screen 6 Navy Turn Banner | Screen 7 Red Hazard Banner | Screen 9 Green Route Updated Banner)
+                // Top Banner Overlay (Compact so the live driving map remains maximally visible)
                 Column(
                     modifier = Modifier
                         .fillMaxWidth()
                         .align(Alignment.TopCenter)
                         .windowInsetsPadding(WindowInsets.statusBars)
-                        .padding(horizontal = 14.dp, vertical = 8.dp)
+                        .padding(horizontal = 12.dp, vertical = 6.dp)
                 ) {
                     when {
                         isHazardDetected -> {
-                            val hzName = primaryAffectingHazard?.name ?: "Bridge B1"
-                            val sevText = when (primaryAffectingHazard?.severity) {
-                                HazardSeverity.CRITICAL, null -> stringResource(R.string.severity_critical) + " Hazard"
-                                HazardSeverity.HIGH -> stringResource(R.string.severity_high)
-                                HazardSeverity.MEDIUM -> stringResource(R.string.severity_medium)
-                                HazardSeverity.LOW -> stringResource(R.string.severity_low)
-                            }
+                            val hzName = primaryAffectingHazard?.name ?: "Road / Bridge Hazard"
+                            val hzType = primaryAffectingHazard?.type?.displayName ?: "Critical Hazard"
                             HazardDetectedTopBanner(
-                                subtitle = "$hzName - $sevText"
+                                subtitle = "$hzName • $hzType"
                             )
                         }
 
@@ -185,27 +170,15 @@ fun LiveNavigationScreen(
                             )
                         }
                     }
-
-                    // In DEMO MODE, provide a compact Interactive Presentation Stepper bar so the
-                    // student/evaluator can test or replay Screens 6 -> 7 -> 8 -> 9 -> 10 on demand!
-                    if (operatingMode == OperatingMode.DEMO) {
-                        Spacer(modifier = Modifier.height(8.dp))
-                        DemoModePresentationBar(
-                            workflowState = workflowState,
-                            onTriggerHazard = onTriggerDemoHazard,
-                            onTriggerReroute = onTriggerRerouteNow,
-                            onCompleteJourney = onArriveAtDestination
-                        )
-                    }
                 }
 
-                // Bottom Card Overlay (Screen 7 Hazard Card OR Screen 6/9 Remaining/ETA/End Card)
+                // Bottom Card Overlay
                 Box(
                     modifier = Modifier
                         .fillMaxWidth()
                         .align(Alignment.BottomCenter)
                         .windowInsetsPadding(WindowInsets.navigationBars)
-                        .padding(horizontal = 14.dp, vertical = 12.dp)
+                        .padding(horizontal = 12.dp, vertical = 8.dp)
                 ) {
                     if (isHazardDetected) {
                         HazardAlertBottomCard(
@@ -215,20 +188,9 @@ fun LiveNavigationScreen(
                             onFindSaferRoute = onTriggerRerouteNow
                         )
                     } else {
-                        val displayDistMeters = if (isSaferRouteUpdated && operatingMode == OperatingMode.DEMO) {
-                            17600.0 // 17.6 km matching Screen 9
-                        } else {
-                            remainingDistanceMeters
-                        }
-                        val displayEtaMins = if (isSaferRouteUpdated && operatingMode == OperatingMode.DEMO) {
-                            30 // 30 min matching Screen 9
-                        } else {
-                            remainingEtaMinutes
-                        }
-
                         NavigationBottomSummaryCard(
-                            remainingDistanceText = GeoUtils.formatDistance(displayDistMeters, useKilometers),
-                            etaText = "$displayEtaMins min",
+                            remainingDistanceText = GeoUtils.formatDistance(remainingDistanceMeters, useKilometers),
+                            etaText = "$remainingEtaMinutes min",
                             onEndNavigation = onEndNavigation
                         )
                     }
@@ -238,9 +200,6 @@ fun LiveNavigationScreen(
     }
 }
 
-/**
- * SCREEN 6 TOP BANNER — Dark Navy Turn Instruction Card
- */
 @Composable
 private fun TurnInstructionTopBanner(
     distanceText: String,
@@ -254,9 +213,9 @@ private fun TurnInstructionTopBanner(
     }
 
     Card(
-        shape = RoundedCornerShape(18.dp),
-        colors = CardDefaults.cardColors(containerColor = RoutePilotNavy),
-        elevation = CardDefaults.cardElevation(defaultElevation = 8.dp),
+        shape = RoundedCornerShape(16.dp),
+        colors = CardDefaults.cardColors(containerColor = RoutePilotNavy.copy(alpha = 0.95f)),
+        elevation = CardDefaults.cardElevation(defaultElevation = 6.dp),
         modifier = Modifier
             .fillMaxWidth()
             .testTag("turn_instruction_banner")
@@ -264,39 +223,37 @@ private fun TurnInstructionTopBanner(
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(horizontal = 18.dp, vertical = 16.dp),
+                .padding(horizontal = 14.dp, vertical = 10.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
             Icon(
                 imageVector = turnIcon,
                 contentDescription = maneuver,
                 tint = Color.White,
-                modifier = Modifier.size(40.dp)
+                modifier = Modifier.size(32.dp)
             )
-            Spacer(modifier = Modifier.width(14.dp))
+            Spacer(modifier = Modifier.width(12.dp))
             Column {
                 Text(
                     text = distanceText,
-                    style = MaterialTheme.typography.headlineMedium.copy(
+                    style = MaterialTheme.typography.titleLarge.copy(
                         fontWeight = FontWeight.ExtraBold,
                         color = Color.White
                     )
                 )
                 Text(
                     text = instructionText,
-                    style = MaterialTheme.typography.bodyLarge.copy(
+                    style = MaterialTheme.typography.bodyMedium.copy(
                         color = Color(0xFFE2E8F0),
                         fontWeight = FontWeight.Medium
-                    )
+                    ),
+                    maxLines = 1
                 )
             }
         }
     }
 }
 
-/**
- * SCREEN 7 TOP BANNER — Red "Hazard Detected Ahead!" Card
- */
 @Composable
 private fun HazardDetectedTopBanner(
     subtitle: String
@@ -333,8 +290,8 @@ private fun HazardDetectedTopBanner(
                 Text(
                     text = subtitle,
                     style = MaterialTheme.typography.bodyLarge.copy(
-                        color = Color.White.copy(alpha = 0.92f),
-                        fontWeight = FontWeight.Medium
+                        color = Color.White.copy(alpha = 0.94f),
+                        fontWeight = FontWeight.SemiBold
                     )
                 )
             }
@@ -342,9 +299,6 @@ private fun HazardDetectedTopBanner(
     }
 }
 
-/**
- * SCREEN 9 TOP BANNER — Green "Route Updated - A safer route has been selected." Card
- */
 @Composable
 private fun RouteUpdatedTopBanner() {
     Card(
@@ -389,7 +343,8 @@ private fun RouteUpdatedTopBanner() {
 }
 
 /**
- * SCREEN 7 BOTTOM CARD — Bridge B1 Critical Hazard Card with Bridge Thumbnail
+ * SCREEN 7 BOTTOM CARD — Displays Hazard Name, Hazard Type badge, Severity badge,
+ * Distance Ahead, Road Status, and optional Admin description.
  */
 @Composable
 private fun HazardAlertBottomCard(
@@ -399,6 +354,18 @@ private fun HazardAlertBottomCard(
     onFindSaferRoute: () -> Unit
 ) {
     val hazardName = hazard?.name ?: "Bridge B1"
+    val hazardTypeDisplay = hazard?.type?.displayName ?: "Bridge Structural Damage"
+    val severityLabel = when (hazard?.severity) {
+        HazardSeverity.CRITICAL, null -> stringResource(R.string.severity_critical)
+        HazardSeverity.HIGH -> stringResource(R.string.severity_high)
+        HazardSeverity.MEDIUM -> stringResource(R.string.severity_medium)
+        HazardSeverity.LOW -> stringResource(R.string.severity_low)
+    }
+    val severityBadgeColor = when (hazard?.severity) {
+        HazardSeverity.CRITICAL, HazardSeverity.HIGH, null -> HazardRed
+        HazardSeverity.MEDIUM -> HazardOrange
+        HazardSeverity.LOW -> Color(0xFFFBC02D)
+    }
     val distMeters = hazard?.distanceAheadMeters ?: 2100.0
     val distanceAheadText = stringResource(
         R.string.distance_ahead_format,
@@ -464,19 +431,39 @@ private fun HazardAlertBottomCard(
 
                     Spacer(modifier = Modifier.height(4.dp))
 
-                    // Red "Critical" pill badge
-                    Surface(
-                        shape = RoundedCornerShape(8.dp),
-                        color = HazardRed
+                    // Severity Badge + Hazard Type Badge
+                    Row(
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        verticalAlignment = Alignment.CenterVertically
                     ) {
-                        Text(
-                            text = stringResource(R.string.severity_critical),
-                            style = MaterialTheme.typography.labelMedium.copy(
-                                color = Color.White,
-                                fontWeight = FontWeight.Bold
-                            ),
-                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 3.dp)
-                        )
+                        Surface(
+                            shape = RoundedCornerShape(8.dp),
+                            color = severityBadgeColor
+                        ) {
+                            Text(
+                                text = severityLabel,
+                                style = MaterialTheme.typography.labelMedium.copy(
+                                    color = Color.White,
+                                    fontWeight = FontWeight.Bold
+                                ),
+                                modifier = Modifier.padding(horizontal = 10.dp, vertical = 3.dp)
+                            )
+                        }
+
+                        Surface(
+                            shape = RoundedCornerShape(8.dp),
+                            color = RoutePilotBlueLight
+                        ) {
+                            Text(
+                                text = hazardTypeDisplay,
+                                style = MaterialTheme.typography.labelMedium.copy(
+                                    color = RoutePilotBlue,
+                                    fontWeight = FontWeight.Bold
+                                ),
+                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp),
+                                maxLines = 1
+                            )
+                        }
                     }
 
                     Spacer(modifier = Modifier.height(6.dp))
@@ -494,15 +481,22 @@ private fun HazardAlertBottomCard(
                             color = Color(0xFF0F172A)
                         )
                     )
+
+                    if (!hazard?.description.isNullOrBlank()) {
+                        Spacer(modifier = Modifier.height(2.dp))
+                        Text(
+                            text = hazard?.description.orEmpty(),
+                            style = MaterialTheme.typography.labelMedium,
+                            color = Color(0xFF64748B),
+                            maxLines = 2
+                        )
+                    }
                 }
             }
         }
     }
 }
 
-/**
- * SCREEN 6 & SCREEN 9 BOTTOM CARD — Remaining Distance | ETA | Red "End" Button
- */
 @Composable
 private fun NavigationBottomSummaryCard(
     remainingDistanceText: String,
@@ -510,9 +504,9 @@ private fun NavigationBottomSummaryCard(
     onEndNavigation: () -> Unit
 ) {
     Card(
-        shape = RoundedCornerShape(22.dp),
-        colors = CardDefaults.cardColors(containerColor = Color.White),
-        elevation = CardDefaults.cardElevation(defaultElevation = 10.dp),
+        shape = RoundedCornerShape(18.dp),
+        colors = CardDefaults.cardColors(containerColor = Color.White.copy(alpha = 0.96f)),
+        elevation = CardDefaults.cardElevation(defaultElevation = 8.dp),
         modifier = Modifier
             .fillMaxWidth()
             .testTag("navigation_bottom_card")
@@ -520,21 +514,21 @@ private fun NavigationBottomSummaryCard(
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(horizontal = 20.dp, vertical = 16.dp),
+                .padding(horizontal = 16.dp, vertical = 10.dp),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.SpaceBetween
         ) {
             Column {
                 Text(
                     text = remainingDistanceText,
-                    style = MaterialTheme.typography.headlineMedium.copy(
+                    style = MaterialTheme.typography.titleLarge.copy(
                         fontWeight = FontWeight.ExtraBold,
                         color = Color(0xFF0F172A)
                     )
                 )
                 Text(
                     text = stringResource(R.string.label_remaining),
-                    style = MaterialTheme.typography.bodyMedium,
+                    style = MaterialTheme.typography.labelMedium,
                     color = Color(0xFF64748B)
                 )
             }
@@ -542,47 +536,38 @@ private fun NavigationBottomSummaryCard(
             Column {
                 Text(
                     text = etaText,
-                    style = MaterialTheme.typography.headlineMedium.copy(
+                    style = MaterialTheme.typography.titleLarge.copy(
                         fontWeight = FontWeight.ExtraBold,
                         color = Color(0xFF0F172A)
                     )
                 )
                 Text(
                     text = stringResource(R.string.label_eta),
-                    style = MaterialTheme.typography.bodyMedium,
+                    style = MaterialTheme.typography.labelMedium,
                     color = Color(0xFF64748B)
                 )
             }
 
             Button(
                 onClick = onEndNavigation,
-                shape = RoundedCornerShape(14.dp),
+                shape = RoundedCornerShape(12.dp),
                 colors = ButtonDefaults.buttonColors(containerColor = HazardRed),
                 modifier = Modifier
-                    .height(48.dp)
-                    .width(92.dp)
+                    .height(42.dp)
+                    .width(86.dp)
                     .testTag("end_navigation_button")
             ) {
                 Text(
                     text = stringResource(R.string.action_end_navigation),
                     color = Color.White,
                     fontWeight = FontWeight.Bold,
-                    fontSize = 15.sp
+                    fontSize = 14.sp
                 )
             }
         }
     }
 }
 
-/**
- * SCREEN 8 — RECALCULATING ROUTE SCREEN
- * Matches Screen 8 of the reference design:
- * - Circular blue refresh ring around a car icon
- * - "Recalculating Route..."
- * - "Finding a safer and optimal path for you"
- * - Blue progress indicator bar
- * - Soft pink/red "Cancel" button (or Try Again / End Navigation on error)
- */
 @Composable
 private fun RecalculatingRouteView(
     progress: Float,
@@ -611,7 +596,6 @@ private fun RecalculatingRouteView(
             Column(
                 horizontalAlignment = Alignment.CenterHorizontally
             ) {
-                // Circular Car & Route Refresh Emblem (matching Screen 8)
                 Box(
                     modifier = Modifier.size(164.dp),
                     contentAlignment = Alignment.Center
@@ -744,88 +728,5 @@ private fun RecalculatingRouteView(
                 }
             }
         }
-    }
-}
-
-/**
- * Clearly labeled Demo Mode presentation stepper bar allowing instant demonstration
- * of Hazard Detection -> A* Recalculation -> Safer Route -> Arrival.
- */
-@Composable
-private fun DemoModePresentationBar(
-    workflowState: NavigationWorkflowState,
-    onTriggerHazard: () -> Unit,
-    onTriggerReroute: () -> Unit,
-    onCompleteJourney: () -> Unit
-) {
-    Surface(
-        shape = RoundedCornerShape(12.dp),
-        color = Color(0xFF0F172A).copy(alpha = 0.86f),
-        modifier = Modifier.fillMaxWidth()
-    ) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .horizontalScroll(rememberScrollState())
-                .padding(horizontal = 10.dp, vertical = 6.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(8.dp)
-        ) {
-            Text(
-                text = "DEMO CONTROLS:",
-                style = MaterialTheme.typography.labelMedium.copy(
-                    color = HazardOrange,
-                    fontWeight = FontWeight.ExtraBold,
-                    fontSize = 10.sp
-                )
-            )
-
-            DemoStepChip(
-                text = "Simulate Bridge B1 Hazard",
-                isActive = workflowState == NavigationWorkflowState.HAZARD_DETECTED,
-                onClick = onTriggerHazard,
-                testTag = "demo_btn_trigger_hazard"
-            )
-
-            DemoStepChip(
-                text = "Recalculate Safer Route",
-                isActive = workflowState == NavigationWorkflowState.ROUTE_UPDATED,
-                onClick = onTriggerReroute,
-                testTag = "demo_btn_reroute"
-            )
-
-            DemoStepChip(
-                text = "Arrive at Destination",
-                isActive = workflowState == NavigationWorkflowState.ARRIVED,
-                onClick = onCompleteJourney,
-                testTag = "demo_btn_arrive"
-            )
-        }
-    }
-}
-
-@Composable
-private fun DemoStepChip(
-    text: String,
-    isActive: Boolean,
-    onClick: () -> Unit,
-    testTag: String
-) {
-    Surface(
-        shape = RoundedCornerShape(8.dp),
-        color = if (isActive) RoutePilotBlue else Color(0xFF334155),
-        modifier = Modifier
-            .clickable(onClick = onClick)
-            .testTag(testTag)
-    ) {
-        Text(
-            text = text,
-            style = MaterialTheme.typography.labelMedium.copy(
-                color = Color.White,
-                fontWeight = FontWeight.SemiBold,
-                fontSize = 11.sp
-            ),
-            modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp)
-        )
     }
 }

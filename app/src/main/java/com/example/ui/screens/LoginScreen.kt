@@ -110,17 +110,7 @@ fun LoginScreen(
                 .padding(horizontal = 24.dp, vertical = 16.dp),
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.End
-            ) {
-                OperatingModeBadge(
-                    mode = operatingMode,
-                    onToggleMode = onToggleOperatingMode
-                )
-            }
-
-            Spacer(modifier = Modifier.height(8.dp))
+            Spacer(modifier = Modifier.height(16.dp))
 
             RoutePilotBrandLogo(iconSize = 72.dp, showTagline = false)
 

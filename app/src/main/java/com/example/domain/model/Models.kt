@@ -95,7 +95,8 @@ data class RoadEdge(
     val speedLimitKmh: Int = 60,
     val roadStatus: RoadStatus = RoadStatus.NORMAL,
     val blocked: Boolean = false,
-    val hazardPenaltySeconds: Double = 0.0
+    val hazardPenaltySeconds: Double = 0.0,
+    val geometry: List<LocationPoint> = emptyList()
 )
 
 @Immutable

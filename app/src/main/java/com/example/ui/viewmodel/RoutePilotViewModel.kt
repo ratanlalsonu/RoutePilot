@@ -41,9 +41,6 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.collectLatest
-import kotlinx.coroutines.flow.distinctUntilChanged
-import kotlinx.coroutines.flow.flatMapLatest
-import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import java.util.UUID
@@ -87,7 +84,7 @@ data class RoutePilotUiState(
     val remainingDistanceMeters: Double = 18400.0,
     val remainingEtaMinutes: Int = 32,
     val currentTurnDistanceMeters: Double = 500.0,
-    val currentTurnInstruction: String = "Turn right onto NH 27",
+    val currentTurnInstruction: String = "Continue on main route",
     val currentTurnManeuver: String = "RIGHT",
     val activeHazards: List<Hazard> = emptyList(),
     val relevantHazardsOnRoute: List<Hazard> = emptyList(),
@@ -101,7 +98,6 @@ data class RoutePilotUiState(
     val statusBannerMessage: String? = null
 )
 
-@OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
 class RoutePilotViewModel(
     private val authRepository: AuthRepository,
     private val destinationRepository: DestinationRepository,
@@ -122,7 +118,6 @@ class RoutePilotViewModel(
     val uiState: StateFlow<RoutePilotUiState> = _uiState.asStateFlow()
 
     private var gpsTrackingJob: Job? = null
-    private var demoNavigationJob: Job? = null
     private var recalculationJob: Job? = null
     private var searchDebounceJob: Job? = null
     private var navigationStartTimestamp: Long = 0L
@@ -152,27 +147,15 @@ class RoutePilotViewModel(
             }
         }
 
-        // Observe recent destinations filtered by operating mode
         viewModelScope.launch {
-            preferencesRepository.preferencesFlow
-                .map { it.operatingMode == OperatingMode.DEMO }
-                .distinctUntilChanged()
-                .flatMapLatest { includeDemo ->
-                    destinationRepository.getRecentDestinations(includeDemoSamples = includeDemo)
-                }
+            destinationRepository.getRecentDestinations(includeDemoSamples = true)
                 .collectLatest { recent ->
                     _uiState.update { it.copy(recentDestinations = recent) }
                 }
         }
 
-        // Observe journey history filtered by operating mode
         viewModelScope.launch {
-            preferencesRepository.preferencesFlow
-                .map { it.operatingMode == OperatingMode.DEMO }
-                .distinctUntilChanged()
-                .flatMapLatest { includeDemo ->
-                    journeyRepository.getJourneyHistory(includeDemoSamples = includeDemo)
-                }
+            journeyRepository.getJourneyHistory(includeDemoSamples = false)
                 .collectLatest { history ->
                     _uiState.update { it.copy(journeyHistory = history) }
                 }
@@ -189,12 +172,7 @@ class RoutePilotViewModel(
 
     private fun observeRealtimeHazards() {
         viewModelScope.launch {
-            preferencesRepository.preferencesFlow
-                .map { it.operatingMode }
-                .distinctUntilChanged()
-                .flatMapLatest { mode ->
-                    hazardRepository.observeActiveHazards(mode)
-                }
+            hazardRepository.observeActiveHazards(OperatingMode.LIVE)
                 .collectLatest { hazards ->
                     _uiState.update { it.copy(activeHazards = hazards) }
                     evaluateActiveNavigationAgainstHazards(hazards)
@@ -214,7 +192,7 @@ class RoutePilotViewModel(
         if (hasPerm) {
             viewModelScope.launch {
                 val loc = locationTracker.getCurrentLocationOnce()
-                if (loc != null && _uiState.value.preferences.operatingMode == OperatingMode.LIVE) {
+                if (loc != null) {
                     _uiState.update { it.copy(currentLocation = loc) }
                 }
             }
@@ -226,9 +204,7 @@ class RoutePilotViewModel(
         if (gpsTrackingJob?.isActive == true) return
         gpsTrackingJob = viewModelScope.launch {
             locationTracker.observeLocationUpdates().collectLatest { gpsPoint ->
-                if (_uiState.value.preferences.operatingMode == OperatingMode.LIVE) {
-                    onNewDriverLocationReceived(gpsPoint)
-                }
+                onNewDriverLocationReceived(gpsPoint)
             }
         }
     }
@@ -255,10 +231,8 @@ class RoutePilotViewModel(
             return
         }
 
-        // 2. Check off-route deviation in LIVE mode
-        if (state.preferences.operatingMode == OperatingMode.LIVE &&
-            routeImpactDetector.isDriverOffRoute(newPoint, activeRoute)
-        ) {
+        // 2. Check off-route deviation
+        if (routeImpactDetector.isDriverOffRoute(newPoint, activeRoute)) {
             _uiState.update { it.copy(currentLocation = newPoint) }
             triggerAutomaticRerouting(reasonHazard = null)
             return
@@ -288,12 +262,12 @@ class RoutePilotViewModel(
     }
 
     /**
-     * Evaluates whether any active hazard affects the driver's current route.
-     * Does NOT reroute if hazards are far away from the active route.
+     * Evaluates whether any active hazard from the Backend / Firestore affects the driver's
+     * selected route (in Route Preview or Live Navigation).
      */
     private fun evaluateActiveNavigationAgainstHazards(hazards: List<Hazard>) {
         val state = _uiState.value
-        val route = state.activeRoute ?: return
+        val route = state.activeRoute ?: state.recommendedRoute ?: return
         val isNavigating = state.workflowState == NavigationWorkflowState.NAVIGATING ||
             state.workflowState == NavigationWorkflowState.ROUTE_UPDATED
 
@@ -310,15 +284,17 @@ class RoutePilotViewModel(
             )
         }
 
-        if (isNavigating && impact.isAffected && impact.requiresImmediateReroute) {
+        if (isNavigating && impact.isAffected) {
             val hazard = impact.primaryAffectingHazard ?: return
-            val hazardVersionKey = "${hazard.id}_${hazard.status}_${hazard.severity}"
+            val hazardVersionKey = "${hazard.id}_${hazard.status}_${hazard.severity}_${hazard.type}"
             if (!handledHazardIdsForCurrentRoute.contains(hazardVersionKey)) {
                 handledHazardIdsForCurrentRoute.add(hazardVersionKey)
-                onRouteAffectingHazardDetected(hazard)
+                onRouteAffectingHazardDetected(
+                    hazard = hazard,
+                    autoReroute = impact.requiresImmediateReroute
+                )
             }
         } else if (state.workflowState == NavigationWorkflowState.HAZARD_DETECTED && !impact.isAffected) {
-            // Hazard was cleared by Admin Panel while alert was showing
             _uiState.update {
                 it.copy(
                     workflowState = NavigationWorkflowState.NAVIGATING,
@@ -329,7 +305,10 @@ class RoutePilotViewModel(
         }
     }
 
-    private fun onRouteAffectingHazardDetected(hazard: Hazard) {
+    private fun onRouteAffectingHazardDetected(
+        hazard: Hazard,
+        autoReroute: Boolean
+    ) {
         val prefs = _uiState.value.preferences
         _uiState.update {
             it.copy(
@@ -341,22 +320,23 @@ class RoutePilotViewModel(
         val statusLabel = when (hazard.status) {
             com.example.domain.model.HazardStatus.BLOCKED -> "Road Blocked"
             com.example.domain.model.HazardStatus.PARTIALLY_BLOCKED -> "Partially Blocked"
-            else -> "Critical Hazard Ahead"
+            else -> hazard.type.displayName
         }
 
         hazardAlertService.triggerHazardAlertFeedback(
-            hazardTitle = hazard.name,
+            hazardTitle = "${hazard.name}, ${hazard.type.displayName}",
             statusText = statusLabel,
             soundEnabled = prefs.alertSoundEnabled,
             voiceEnabled = prefs.navigationVoiceEnabled && !_uiState.value.isVoiceMutedInNav
         )
 
-        // Automatically transition from Hazard Alert (Screen 7) -> Recalculating Route (Screen 8) -> New Safer Route (Screen 9)
-        recalculationJob?.cancel()
-        recalculationJob = viewModelScope.launch {
-            delay(3400L)
-            if (_uiState.value.workflowState == NavigationWorkflowState.HAZARD_DETECTED) {
-                triggerAutomaticRerouting(reasonHazard = hazard)
+        if (autoReroute) {
+            recalculationJob?.cancel()
+            recalculationJob = viewModelScope.launch {
+                delay(3800L)
+                if (_uiState.value.workflowState == NavigationWorkflowState.HAZARD_DETECTED) {
+                    triggerAutomaticRerouting(reasonHazard = hazard)
+                }
             }
         }
     }
@@ -413,7 +393,7 @@ class RoutePilotViewModel(
                     remainingDistanceMeters = newSaferRoute.totalDistanceMeters,
                     remainingEtaMinutes = newSaferRoute.durationMinutes,
                     currentTurnDistanceMeters = 350.0,
-                    currentTurnInstruction = nextSegment?.instruction ?: "Continue onto Northern Ring Bypass",
+                    currentTurnInstruction = nextSegment?.instruction ?: "Continue onto safer route",
                     currentTurnManeuver = nextSegment?.maneuverType ?: "LEFT",
                     recalculationProgress = 1f,
                     recalculationErrorMessage = null
@@ -509,10 +489,6 @@ class RoutePilotViewModel(
         }
     }
 
-    fun clearAuthError() {
-        _uiState.update { it.copy(authError = null, statusBannerMessage = null) }
-    }
-
     fun logout(onLoggedOut: () -> Unit) {
         viewModelScope.launch {
             stopActiveNavigation()
@@ -563,6 +539,27 @@ class RoutePilotViewModel(
                 workflowState = NavigationWorkflowState.DESTINATION_SELECTED
             )
         }
+        viewModelScope.launch {
+            destinationRepository.saveRecentDestination(destination.copy(isDemoSample = false))
+        }
+    }
+
+    fun deleteRecentDestination(destinationId: String) {
+        viewModelScope.launch {
+            destinationRepository.deleteRecentDestination(destinationId)
+        }
+    }
+
+    fun clearAllRecentDestinations() {
+        viewModelScope.launch {
+            destinationRepository.clearAllRecentDestinations()
+        }
+    }
+
+    fun restoreDefaultRecentDestinations() {
+        viewModelScope.launch {
+            destinationRepository.restoreDefaultRecentDestinations()
+        }
     }
 
     fun selectPointOnMap(lat: Double, lng: Double) {
@@ -586,14 +583,7 @@ class RoutePilotViewModel(
         val dest = _uiState.value.selectedDestination
         viewModelScope.launch {
             _uiState.update { it.copy(workflowState = NavigationWorkflowState.ROUTE_CALCULATING) }
-            destinationRepository.saveRecentDestination(dest)
-
-            // In Demo Mode, start with Bridge B1 unblocked during initial Route Preview
-            // so the driver first sees the normal 18.4 km / 32 min NH-27 route, and then
-            // receives the real-time Bridge B1 hazard during live navigation!
-            if (_uiState.value.preferences.operatingMode == OperatingMode.DEMO) {
-                hazardRepository.resetDemoScenario()
-            }
+            destinationRepository.saveRecentDestination(dest.copy(isDemoSample = false))
 
             val calcResult = routingRepository.calculateRoutes(
                 origin = _uiState.value.currentLocation,
@@ -605,6 +595,11 @@ class RoutePilotViewModel(
             val rec = calcResult.recommendedRoute
             val alt = calcResult.alternateRoute
             if (rec != null) {
+                val impact = routeImpactDetector.analyzeRouteImpact(
+                    currentLocation = _uiState.value.currentLocation,
+                    activeRoute = rec,
+                    activeHazards = _uiState.value.activeHazards
+                )
                 _uiState.update {
                     it.copy(
                         workflowState = NavigationWorkflowState.ROUTE_READY,
@@ -613,7 +608,9 @@ class RoutePilotViewModel(
                         activeRoute = rec,
                         isUsingAlternateInPreview = false,
                         remainingDistanceMeters = rec.totalDistanceMeters,
-                        remainingEtaMinutes = rec.durationMinutes
+                        remainingEtaMinutes = rec.durationMinutes,
+                        relevantHazardsOnRoute = impact.allRelevantHazards,
+                        primaryAffectingHazard = impact.primaryAffectingHazard
                     )
                 }
                 onRouteReady()
@@ -636,18 +633,26 @@ class RoutePilotViewModel(
             state.recommendedRoute
         } ?: return
 
+        val impact = routeImpactDetector.analyzeRouteImpact(
+            currentLocation = state.currentLocation,
+            activeRoute = chosen,
+            activeHazards = state.activeHazards
+        )
+
         _uiState.update {
             it.copy(
                 isUsingAlternateInPreview = useAlternate,
                 activeRoute = chosen,
                 remainingDistanceMeters = chosen.totalDistanceMeters,
-                remainingEtaMinutes = chosen.durationMinutes
+                remainingEtaMinutes = chosen.durationMinutes,
+                relevantHazardsOnRoute = impact.allRelevantHazards,
+                primaryAffectingHazard = impact.primaryAffectingHazard
             )
         }
     }
 
     // ========================================================================
-    // Screen 6, 7, 8, 9, 10: Live Navigation, Hazard Alert, Rerouting & Arrival
+    // Screen 6, 7, 8, 9, 10: Live Navigation, Real-Time Hazard Alert & Rerouting
     // ========================================================================
 
     fun startDrivingNavigation() {
@@ -656,16 +661,16 @@ class RoutePilotViewModel(
         handledHazardIdsForCurrentRoute.clear()
 
         val firstSeg = route.segments.getOrNull(1) ?: route.segments.firstOrNull()
-        val initialInstruction = firstSeg?.instruction ?: "Turn right onto NH 27"
+        val initialInstruction = firstSeg?.instruction ?: "Continue on main route"
 
         _uiState.update {
             it.copy(
                 workflowState = NavigationWorkflowState.NAVIGATING,
                 activeRoute = route,
                 previousRouteBeforeDiversion = null,
-                remainingDistanceMeters = route.totalDistanceMeters - 200.0, // 18.2 km remaining as in Screen 6
+                remainingDistanceMeters = route.totalDistanceMeters,
                 remainingEtaMinutes = route.durationMinutes,
-                currentTurnDistanceMeters = 500.0,
+                currentTurnDistanceMeters = firstSeg?.distanceMeters?.coerceAtMost(500.0) ?: 500.0,
                 currentTurnInstruction = initialInstruction,
                 currentTurnManeuver = firstSeg?.maneuverType ?: "RIGHT",
                 primaryAffectingHazard = null
@@ -673,29 +678,12 @@ class RoutePilotViewModel(
         }
 
         hazardAlertService.announceTurnInstruction(
-            instruction = "In 500 meters, $initialInstruction",
+            instruction = initialInstruction,
             voiceEnabled = _uiState.value.preferences.navigationVoiceEnabled && !_uiState.value.isVoiceMutedInNav
         )
 
-        // If OperatingMode is DEMO, run the controlled demonstration sequence so the student/evaluator
-        // sees Screen 6 (Driving) -> Backend pushes Bridge B1 Critical Hazard -> Screen 7 (Hazard Alert)
-        // -> Screen 8 (Recalculating Route) -> Screen 9 (New Safer Route) automatically or via controls!
-        demoNavigationJob?.cancel()
-        if (_uiState.value.preferences.operatingMode == OperatingMode.DEMO) {
-            demoNavigationJob = viewModelScope.launch {
-                delay(4500L)
-                if (_uiState.value.workflowState == NavigationWorkflowState.NAVIGATING) {
-                    hazardRepository.triggerDemoBridgeHazard()
-                }
-            }
-        } else {
-            // In LIVE mode, evaluate any already-active backend hazards immediately
-            evaluateActiveNavigationAgainstHazards(_uiState.value.activeHazards)
-        }
-    }
-
-    fun triggerSimulatedHazardNow() {
-        hazardRepository.triggerDemoBridgeHazard()
+        // Immediately evaluate any active backend/Firestore hazards on the selected route
+        evaluateActiveNavigationAgainstHazards(_uiState.value.activeHazards)
     }
 
     fun dismissHazardAlertAndContinue() {
@@ -723,18 +711,13 @@ class RoutePilotViewModel(
     }
 
     fun completeActiveJourney() {
-        demoNavigationJob?.cancel()
         recalculationJob?.cancel()
 
         val state = _uiState.value
         val route = state.activeRoute ?: state.recommendedRoute
         val dest = route?.destination ?: state.selectedDestination
         val distanceKm = (route?.totalDistanceMeters ?: 18400.0) / 1000.0
-        val durationMin = if (state.workflowState == NavigationWorkflowState.ROUTE_UPDATED) {
-            31 // Matches Screen 10 (18.4 km / 31 min)
-        } else {
-            route?.durationMinutes ?: 31
-        }
+        val durationMin = route?.durationMinutes ?: 31
 
         val journey = Journey(
             id = "jrn_${UUID.randomUUID().toString().take(8)}",
@@ -746,17 +729,18 @@ class RoutePilotViewModel(
             sourceLng = state.currentLocation.longitude,
             destLat = dest.latitude,
             destLng = dest.longitude,
-            distanceKm = if (state.preferences.operatingMode == OperatingMode.DEMO) 18.4 else distanceKm,
+            distanceKm = distanceKm,
             durationMinutes = durationMin,
             startedAt = if (navigationStartTimestamp > 0L) navigationStartTimestamp else System.currentTimeMillis() - 1860_000L,
             completedAt = System.currentTimeMillis(),
             status = if (route?.isDivertedForSafety == true) "SAFELY_DIVERTED" else "COMPLETED",
             hazardsAvoidedCount = route?.avoidedHazardIds?.size ?: 0,
-            isDemoRecord = state.preferences.operatingMode == OperatingMode.DEMO
+            isDemoRecord = false
         )
 
         viewModelScope.launch {
             journeyRepository.saveJourney(journey)
+            destinationRepository.saveRecentDestination(dest.copy(isDemoSample = false))
         }
 
         hazardAlertService.announceArrival(
@@ -773,11 +757,7 @@ class RoutePilotViewModel(
     }
 
     fun stopActiveNavigation() {
-        demoNavigationJob?.cancel()
         recalculationJob?.cancel()
-        if (_uiState.value.preferences.operatingMode == OperatingMode.DEMO) {
-            hazardRepository.resetDemoScenario()
-        }
         _uiState.update {
             it.copy(
                 workflowState = NavigationWorkflowState.HOME,
@@ -788,7 +768,7 @@ class RoutePilotViewModel(
     }
 
     // ========================================================================
-    // Settings & Mode Controls
+    // Settings Controls
     // ========================================================================
 
     fun setLanguage(languageCode: String) {
@@ -818,20 +798,6 @@ class RoutePilotViewModel(
     fun setUseKilometers(useKm: Boolean) {
         viewModelScope.launch {
             preferencesRepository.setUseKilometers(useKm)
-        }
-    }
-
-    fun setOperatingMode(mode: OperatingMode) {
-        viewModelScope.launch {
-            preferencesRepository.setOperatingMode(mode)
-            if (mode == OperatingMode.DEMO) {
-                hazardRepository.resetDemoScenario()
-                _uiState.update {
-                    it.copy(currentLocation = OsmRoadNetworkProvider.DEFAULT_ORIGIN)
-                }
-            } else {
-                refreshDeviceLocationStatus()
-            }
         }
     }
 

@@ -13,6 +13,7 @@ import com.example.domain.model.RouteCalculationResult
 import com.example.domain.model.RouteSegment
 import java.util.PriorityQueue
 import java.util.UUID
+import kotlin.math.min
 
 /**
  * Internal Hazard-Aware A* Routing Engine.
@@ -23,7 +24,9 @@ import java.util.UUID
  * - gScore (exact accumulated travel-time + hazard-penalty cost from source)
  * - fScore (gScore + Haversine geographic heuristic)
  * - cameFrom (predecessor node & edge reconstruction)
- * - Dynamic hazard evaluation (strictly blocks BLOCKED edges and penalizes WARNING / PARTIALLY_BLOCKED edges)
+ * - Dynamic hazard evaluation along exact street geometries (`edge.geometry`)
+ * - Full road-following polyline reconstruction (`Route.points`) so both the Best Route
+ *   and Alternate Route highlight the actual roads on the map.
  */
 class AStarRoutingEngine(
     private val roadNetworkProvider: OsmRoadNetworkProvider
@@ -45,7 +48,7 @@ class AStarRoutingEngine(
         val destPoint = LocationPoint(destination.latitude, destination.longitude)
         val rawGraph = roadNetworkProvider.getRoadGraphForRegion(origin, destPoint)
 
-        // Apply active hazards to graph edges
+        // Apply active hazards to graph edges (checking full street geometry)
         val effectiveHazards = activeHazards.filter { it.isEffectiveHazard }
         val avoidedHazardIds = mutableSetOf<String>()
 
@@ -84,7 +87,7 @@ class AStarRoutingEngine(
             )
         }
 
-        // Run A* for primary recommended (and safest) route
+        // Run A* for primary Best (Recommended / Safest) route
         val primaryPath = runAStarSearch(
             graph = hazardGraph,
             startNodeId = startNodeId,
@@ -111,19 +114,19 @@ class AStarRoutingEngine(
             avoidedHazardIds = avoidedHazardIds.toList()
         )
 
-        // Compute an alternate route by applying a diversity penalty to the interior edges of the primary path
-        val primaryInteriorEdgeIds = primaryPath.second
-            .drop(1)
-            .dropLast(1)
-            .map { it.id }
-            .toSet()
+        // Compute the Alternate Route by applying a strong diversity penalty to the edges of the primary path
+        val primaryEdgeIds = if (primaryPath.second.size > 2) {
+            primaryPath.second.map { it.id }.toSet()
+        } else {
+            primaryPath.second.map { it.id }.toSet()
+        }
 
-        val altPath = if (primaryInteriorEdgeIds.isNotEmpty()) {
+        val altPath = if (primaryEdgeIds.isNotEmpty()) {
             runAStarSearch(
                 graph = hazardGraph,
                 startNodeId = startNodeId,
                 goalNodeId = goalNodeId,
-                penalizedEdgeIds = primaryInteriorEdgeIds
+                penalizedEdgeIds = primaryEdgeIds
             )
         } else {
             null
@@ -167,13 +170,12 @@ class AStarRoutingEngine(
                 (!hazard.bridgeId.isNullOrBlank() && edge.id.contains(hazard.bridgeId, ignoreCase = true)) ||
                 (hazard.name.contains("Bridge B1", ignoreCase = true) && edge.id.contains("bridge_b1", ignoreCase = true))
 
-            val distToEdge = GeoUtils.distanceToSegmentMeters(
-                pointLat = hazard.latitude,
-                pointLon = hazard.longitude,
-                segStartLat = nodeU.latitude,
-                segStartLon = nodeU.longitude,
-                segEndLat = nodeV.latitude,
-                segEndLon = nodeV.longitude
+            val distToEdge = computeMinDistanceToEdgeGeometry(
+                hazardLat = hazard.latitude,
+                hazardLon = hazard.longitude,
+                nodeU = nodeU,
+                nodeV = nodeV,
+                geometry = edge.geometry
             )
 
             if (matchesId || distToEdge <= hazard.radiusMeters) {
@@ -210,6 +212,41 @@ class AStarRoutingEngine(
             blocked = isBlocked,
             roadStatus = worstStatus,
             hazardPenaltySeconds = totalPenalty
+        )
+    }
+
+    private fun computeMinDistanceToEdgeGeometry(
+        hazardLat: Double,
+        hazardLon: Double,
+        nodeU: RoadNode,
+        nodeV: RoadNode,
+        geometry: List<LocationPoint>
+    ): Double {
+        if (geometry.size >= 2) {
+            var minDist = Double.MAX_VALUE
+            for (i in 0 until geometry.lastIndex) {
+                val a = geometry[i]
+                val b = geometry[i + 1]
+                val d = GeoUtils.distanceToSegmentMeters(
+                    pointLat = hazardLat,
+                    pointLon = hazardLon,
+                    segStartLat = a.latitude,
+                    segStartLon = a.longitude,
+                    segEndLat = b.latitude,
+                    segEndLon = b.longitude
+                )
+                minDist = min(minDist, d)
+            }
+            return minDist
+        }
+
+        return GeoUtils.distanceToSegmentMeters(
+            pointLat = hazardLat,
+            pointLon = hazardLon,
+            segStartLat = nodeU.latitude,
+            segStartLon = nodeU.longitude,
+            segEndLat = nodeV.latitude,
+            segEndLon = nodeV.longitude
         )
     }
 
@@ -264,7 +301,7 @@ class AStarRoutingEngine(
                 val neighborNode = graph.nodes[neighborId] ?: continue
 
                 // Edge traversal cost = travelTime + dynamic hazardPenalty + diversity penalty (for alternate route)
-                val diversityMultiplier = if (penalizedEdgeIds.contains(edge.id)) 1.65 else 1.0
+                val diversityMultiplier = if (penalizedEdgeIds.contains(edge.id)) 2.40 else 1.0
                 val edgeCost = (edge.travelTimeSeconds * diversityMultiplier) + edge.hazardPenaltySeconds
 
                 val tentativeG = gScore.getValue(currentId) + edgeCost
@@ -327,29 +364,35 @@ class AStarRoutingEngine(
         isDivertedForSafety: Boolean,
         avoidedHazardIds: List<String>
     ): Route {
-        val rawPoints = pathNodes.mapNotNull { nodeId ->
-            nodes[nodeId]?.let { LocationPoint(it.latitude, it.longitude) }
-        }
-
-        // Interpolate smooth intermediate coordinates along each road edge for crisp map polyline rendering & progress tracking
-        val smoothPoints = ArrayList<LocationPoint>()
-        for (i in 0 until rawPoints.size - 1) {
-            val a = rawPoints[i]
-            val b = rawPoints[i + 1]
-            smoothPoints.add(a)
-            val subdivisions = 4
-            for (step in 1 until subdivisions) {
-                val frac = step.toDouble() / subdivisions.toDouble()
-                smoothPoints.add(
-                    LocationPoint(
-                        latitude = a.latitude + (b.latitude - a.latitude) * frac,
-                        longitude = a.longitude + (b.longitude - a.longitude) * frac
-                    )
-                )
+        // Reconstruct full road-following geometry from each traversed RoadEdge
+        val roadGeometryPoints = ArrayList<LocationPoint>()
+        for (edge in pathEdges) {
+            if (edge.geometry.isNotEmpty()) {
+                for (pt in edge.geometry) {
+                    val lastPt = roadGeometryPoints.lastOrNull()
+                    if (lastPt == null ||
+                        GeoUtils.haversineMeters(lastPt.latitude, lastPt.longitude, pt.latitude, pt.longitude) > 1.5
+                    ) {
+                        roadGeometryPoints.add(pt)
+                    }
+                }
+            } else {
+                val u = nodes[edge.fromNode]
+                val v = nodes[edge.toNode]
+                if (u != null) {
+                    val pU = LocationPoint(u.latitude, u.longitude)
+                    if (roadGeometryPoints.isEmpty()) roadGeometryPoints.add(pU)
+                }
+                if (v != null) {
+                    roadGeometryPoints.add(LocationPoint(v.latitude, v.longitude))
+                }
             }
         }
-        if (rawPoints.isNotEmpty()) {
-            smoothPoints.add(rawPoints.last())
+
+        if (roadGeometryPoints.size < 2) {
+            pathNodes.mapNotNullTo(roadGeometryPoints) { nodeId ->
+                nodes[nodeId]?.let { LocationPoint(it.latitude, it.longitude) }
+            }
         }
 
         val totalDistanceMeters = pathEdges.sumOf { it.distanceMeters }
@@ -361,8 +404,8 @@ class AStarRoutingEngine(
         for (edge in pathEdges) {
             val u = nodes[edge.fromNode] ?: continue
             val v = nodes[edge.toNode] ?: continue
-            val pU = LocationPoint(u.latitude, u.longitude)
-            val pV = LocationPoint(v.latitude, v.longitude)
+            val pU = edge.geometry.firstOrNull() ?: LocationPoint(u.latitude, u.longitude)
+            val pV = edge.geometry.lastOrNull() ?: LocationPoint(v.latitude, v.longitude)
             val bearing = GeoUtils.calculateBearing(pU, pV)
             val maneuver = prevBearing?.let { GeoUtils.determineTurnManeuver(it, bearing) } ?: "RIGHT"
             prevBearing = bearing
@@ -386,7 +429,9 @@ class AStarRoutingEngine(
             )
         }
 
-        val hasWarningEdges = pathEdges.any { it.roadStatus == RoadStatus.WARNING || it.roadStatus == RoadStatus.CRITICAL }
+        val hasWarningEdges = pathEdges.any {
+            it.roadStatus == RoadStatus.WARNING || it.roadStatus == RoadStatus.CRITICAL
+        }
         val conditionSummary = when {
             isDivertedForSafety -> "Good (Safer Route Selected)"
             hasWarningEdges -> "Moderate / Caution Advised"
@@ -398,7 +443,7 @@ class AStarRoutingEngine(
             origin = origin,
             destination = destination,
             nodeIds = pathNodes,
-            points = smoothPoints,
+            points = roadGeometryPoints,
             segments = segments,
             totalDistanceMeters = totalDistanceMeters,
             estimatedDurationSeconds = totalDurationSeconds,

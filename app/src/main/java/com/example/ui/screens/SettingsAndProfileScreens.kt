@@ -25,6 +25,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.Logout
+import androidx.compose.material.icons.automirrored.filled.VolumeUp
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.DeleteOutline
 import androidx.compose.material.icons.filled.History
@@ -36,8 +37,6 @@ import androidx.compose.material.icons.filled.Person
 import androidx.compose.material.icons.filled.RecordVoiceOver
 import androidx.compose.material.icons.filled.Security
 import androidx.compose.material.icons.filled.Straighten
-import androidx.compose.material.icons.filled.Tune
-import androidx.compose.material.icons.filled.VolumeUp
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
@@ -66,12 +65,10 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.R
 import com.example.domain.model.Journey
-import com.example.domain.model.OperatingMode
 import com.example.domain.model.User
 import com.example.domain.repository.DriverPreferences
 import com.example.domain.routing.GeoUtils
 import com.example.ui.components.RoutePilotBottomBar
-import com.example.ui.theme.HazardOrange
 import com.example.ui.theme.HazardRed
 import com.example.ui.theme.RoutePilotBlue
 import com.example.ui.theme.RoutePilotBlueLight
@@ -226,23 +223,6 @@ fun HistoryScreen(
                                             )
                                         }
                                     }
-
-                                    if (journey.isDemoRecord) {
-                                        Surface(
-                                            shape = RoundedCornerShape(8.dp),
-                                            color = Color(0xFFFFF3E0)
-                                        ) {
-                                            Text(
-                                                text = stringResource(R.string.badge_demo_sample),
-                                                style = MaterialTheme.typography.labelMedium.copy(
-                                                    color = HazardOrange,
-                                                    fontWeight = FontWeight.Bold,
-                                                    fontSize = 10.sp
-                                                ),
-                                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
-                                            )
-                                        }
-                                    }
                                 }
 
                                 HorizontalDivider(
@@ -301,7 +281,6 @@ fun SettingsScreen(
     onNavigationVoiceChange: (Boolean) -> Unit,
     onAlertSoundChange: (Boolean) -> Unit,
     onUnitsChange: (Boolean) -> Unit,
-    onOperatingModeChange: (OperatingMode) -> Unit,
     onNavigateHome: () -> Unit,
     onNavigateHistory: () -> Unit
 ) {
@@ -377,62 +356,7 @@ fun SettingsScreen(
                 }
             }
 
-            // 2. Operating Mode (Live Mode vs Demo Mode)
-            Card(
-                shape = RoundedCornerShape(16.dp),
-                colors = CardDefaults.cardColors(containerColor = Color.White),
-                modifier = Modifier.fillMaxWidth()
-            ) {
-                Column(modifier = Modifier.padding(16.dp)) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Icon(
-                            imageVector = Icons.Default.Tune,
-                            contentDescription = null,
-                            tint = RoutePilotBlue
-                        )
-                        Spacer(modifier = Modifier.width(12.dp))
-                        Column {
-                            Text(
-                                text = stringResource(R.string.setting_operating_mode),
-                                style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold)
-                            )
-                            Text(
-                                text = if (preferences.operatingMode == OperatingMode.LIVE) {
-                                    stringResource(R.string.mode_live_desc)
-                                } else {
-                                    stringResource(R.string.mode_demo_desc)
-                                },
-                                style = MaterialTheme.typography.bodyMedium.copy(fontSize = 12.sp),
-                                color = Color(0xFF64748B)
-                            )
-                        }
-                    }
-                    Spacer(modifier = Modifier.height(12.dp))
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(10.dp)
-                    ) {
-                        SelectablePillOption(
-                            label = stringResource(R.string.mode_live),
-                            selected = preferences.operatingMode == OperatingMode.LIVE,
-                            onClick = { onOperatingModeChange(OperatingMode.LIVE) },
-                            modifier = Modifier
-                                .weight(1f)
-                                .testTag("mode_option_live")
-                        )
-                        SelectablePillOption(
-                            label = stringResource(R.string.mode_demo),
-                            selected = preferences.operatingMode == OperatingMode.DEMO,
-                            onClick = { onOperatingModeChange(OperatingMode.DEMO) },
-                            modifier = Modifier
-                                .weight(1f)
-                                .testTag("mode_option_demo")
-                        )
-                    }
-                }
-            }
-
-            // 3. Notifications, Voice, Sound, and Units
+            // 2. Notifications, Voice, Sound, and Units
             Card(
                 shape = RoundedCornerShape(16.dp),
                 colors = CardDefaults.cardColors(containerColor = Color.White),
@@ -454,7 +378,7 @@ fun SettingsScreen(
                     )
                     HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp), color = Color(0xFFF1F5F9))
                     SettingsToggleRow(
-                        icon = Icons.Default.VolumeUp,
+                        icon = Icons.AutoMirrored.Filled.VolumeUp,
                         title = stringResource(R.string.setting_sound),
                         checked = preferences.alertSoundEnabled,
                         onCheckedChange = onAlertSoundChange
@@ -469,7 +393,7 @@ fun SettingsScreen(
                 }
             }
 
-            // 4. Privacy & About RoutePilot
+            // 3. Privacy & About RoutePilot
             Card(
                 shape = RoundedCornerShape(16.dp),
                 colors = CardDefaults.cardColors(containerColor = Color.White),
@@ -587,7 +511,6 @@ private fun SettingsToggleRow(
 @Composable
 fun ProfileScreen(
     user: User?,
-    operatingMode: OperatingMode,
     completedTripsCount: Int,
     onBack: () -> Unit,
     onLogout: () -> Unit
@@ -660,14 +583,8 @@ fun ProfileScreen(
             ) {
                 Column(modifier = Modifier.padding(18.dp)) {
                     Text(
-                        text = "Account Status: ${if (user?.isGuest == true) "Guest Mode" else "Verified Driver"}",
+                        text = "Account Status: ${if (user?.isGuest == true) "Guest Session" else "Verified Driver"}",
                         style = MaterialTheme.typography.bodyLarge.copy(fontWeight = FontWeight.SemiBold)
-                    )
-                    Spacer(modifier = Modifier.height(8.dp))
-                    Text(
-                        text = "Current Mode: ${operatingMode.name}",
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = Color(0xFF475569)
                     )
                     Spacer(modifier = Modifier.height(8.dp))
                     Text(

@@ -22,6 +22,12 @@ interface RoutePilotDao {
     @Insert(onConflict = OnConflictStrategy.IGNORE)
     suspend fun insertDestinationsIgnore(destinations: List<DestinationEntity>)
 
+    @Query("DELETE FROM recent_destinations WHERE id = :destinationId")
+    suspend fun deleteDestinationById(destinationId: String)
+
+    @Query("DELETE FROM recent_destinations")
+    suspend fun clearAllDestinations()
+
     // Journeys
     @Query("SELECT * FROM journeys ORDER BY completedAt DESC")
     fun observeAllJourneys(): Flow<List<JourneyEntity>>
