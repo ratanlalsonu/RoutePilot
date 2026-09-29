@@ -89,6 +89,7 @@ fun LiveNavigationScreen(
     primaryAffectingHazard: Hazard?,
     remainingDistanceMeters: Double,
     remainingEtaMinutes: Int,
+    remainingEtaSeconds: Int = remainingEtaMinutes * 60,
     currentTurnDistanceMeters: Double,
     currentTurnInstruction: String,
     currentTurnManeuver: String,
@@ -131,6 +132,8 @@ fun LiveNavigationScreen(
                     primaryRoute = activeRoute,
                     secondaryRoute = null,
                     hazards = activeHazards,
+                    remainingDistanceMeters = remainingDistanceMeters,
+                    remainingEtaSeconds = remainingEtaSeconds,
                     isNavigationMode = true,
                     isSaferGreenRoute = isSaferRouteUpdated || (activeRoute?.isDivertedForSafety == true),
                     isMapsApiKeyConfigured = isMapsApiKeyConfigured,
@@ -188,9 +191,16 @@ fun LiveNavigationScreen(
                             onFindSaferRoute = onTriggerRerouteNow
                         )
                     } else {
+                        val remLabel = stringResource(R.string.label_remaining)
+                        val remainingSubLabel = if (remainingDistanceMeters >= 1000.0 && useKilometers) {
+                            "${remainingDistanceMeters.toInt()} m • $remLabel"
+                        } else {
+                            remLabel
+                        }
                         NavigationBottomSummaryCard(
                             remainingDistanceText = GeoUtils.formatDistance(remainingDistanceMeters, useKilometers),
-                            etaText = "$remainingEtaMinutes min",
+                            remainingSubtitleText = remainingSubLabel,
+                            etaText = GeoUtils.formatLiveRemainingTime(remainingEtaSeconds),
                             onEndNavigation = onEndNavigation
                         )
                     }
@@ -534,6 +544,7 @@ private fun HazardAlertBottomCard(
 @Composable
 private fun NavigationBottomSummaryCard(
     remainingDistanceText: String,
+    remainingSubtitleText: String,
     etaText: String,
     onEndNavigation: () -> Unit
 ) {
@@ -561,7 +572,7 @@ private fun NavigationBottomSummaryCard(
                     )
                 )
                 Text(
-                    text = stringResource(R.string.label_remaining),
+                    text = remainingSubtitleText,
                     style = MaterialTheme.typography.labelMedium,
                     color = Color(0xFF64748B)
                 )

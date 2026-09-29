@@ -83,6 +83,7 @@ data class RoutePilotUiState(
     val isUsingAlternateInPreview: Boolean = false,
     val remainingDistanceMeters: Double = 18400.0,
     val remainingEtaMinutes: Int = 32,
+    val remainingEtaSeconds: Int = 1920,
     val currentTurnDistanceMeters: Double = 500.0,
     val currentTurnInstruction: String = "Continue on main route",
     val currentTurnManeuver: String = "RIGHT",
@@ -124,6 +125,16 @@ class RoutePilotViewModel(
     private var handledHazardIdsForCurrentRoute = mutableSetOf<String>()
     private var rawBackendHazards: List<Hazard> = emptyList()
     private var initialPrimaryRoute: Route? = null
+
+    // Live navigation progress tracking baseline
+    private var navigationOriginLocation: LocationPoint = OsmRoadNetworkProvider.DEFAULT_ORIGIN
+    private var lastTrackedDriverLocation: LocationPoint? = null
+    private var lastNavigationUpdateMillis: Long = 0L
+    private var cumulativeTravelledMeters: Double = 0.0
+    private var activeTravelElapsedSeconds: Int = 0
+    private var initialRouteTotalDistanceMeters: Double = 18400.0
+    private var initialRouteDurationSeconds: Int = 1920
+    private var initialStraightLineToDestMeters: Double = 14000.0
 
     init {
         observePreferencesAndData()
@@ -188,12 +199,6 @@ class RoutePilotViewModel(
         }
     }
 
-    /**
-     * Ensures that when an Admin triggers/creates an active hazard in the Admin Panel,
-     * the hazard is positioned directly on the road path the user was travelling on (`referenceRoute`),
-     * so the hazard marker + warning zone is clearly indicated on that exact path before the user
-     * chooses another path.
-     */
     private fun alignHazardsWithRoutePath(
         hazards: List<Hazard>,
         referenceRoute: Route?
@@ -221,7 +226,6 @@ class RoutePilotViewModel(
             val anchorPt = if (distToNearestMeters <= 1800.0) {
                 nearestPt
             } else {
-                // Anchor Admin preset/remote hazard directly onto the driver's active path midpoint
                 val offsetIdx = (midIndex + (idx * 3)).coerceIn(1, (pts.lastIndex - 1).coerceAtLeast(1))
                 pts[offsetIdx]
             }
@@ -250,12 +254,17 @@ class RoutePilotViewModel(
                     _uiState.update { it.copy(currentLocation = loc) }
                 }
             }
-            startContinuousGpsListening()
         }
+        startContinuousGpsListening(forceRestart = hasPerm)
     }
 
-    private fun startContinuousGpsListening() {
-        if (gpsTrackingJob?.isActive == true) return
+    private fun startContinuousGpsListening(forceRestart: Boolean = false) {
+        if (forceRestart) {
+            gpsTrackingJob?.cancel()
+            gpsTrackingJob = null
+        } else if (gpsTrackingJob?.isActive == true) {
+            return
+        }
         gpsTrackingJob = viewModelScope.launch {
             locationTracker.observeLocationUpdates().collectLatest { gpsPoint ->
                 onNewDriverLocationReceived(gpsPoint)
@@ -263,7 +272,23 @@ class RoutePilotViewModel(
         }
     }
 
-    private fun onNewDriverLocationReceived(newPoint: LocationPoint) {
+    private fun resetNavigationProgressBaseline(route: Route, origin: LocationPoint) {
+        navigationOriginLocation = origin
+        lastTrackedDriverLocation = origin
+        lastNavigationUpdateMillis = System.currentTimeMillis()
+        cumulativeTravelledMeters = 0.0
+        activeTravelElapsedSeconds = 0
+        initialRouteTotalDistanceMeters = route.totalDistanceMeters.coerceAtLeast(50.0)
+        initialRouteDurationSeconds = max(60, route.durationMinutes * 60)
+        initialStraightLineToDestMeters = GeoUtils.haversineMeters(
+            origin.latitude,
+            origin.longitude,
+            route.destination.latitude,
+            route.destination.longitude
+        ).coerceAtLeast(50.0)
+    }
+
+    fun onNewDriverLocationReceived(newPoint: LocationPoint) {
         val state = _uiState.value
         val activeRoute = state.activeRoute
         val isDriving = state.workflowState == NavigationWorkflowState.NAVIGATING ||
@@ -275,8 +300,82 @@ class RoutePilotViewModel(
             return
         }
 
+        val nowMillis = System.currentTimeMillis()
+        val prevPoint = lastTrackedDriverLocation ?: newPoint
+        val coordStepMeters = GeoUtils.haversineMeters(prevPoint, newPoint)
+
+        if (coordStepMeters > 35_000.0) {
+            // Re-anchor baseline if initial location switched from fallback origin to real city GPS
+            navigationOriginLocation = newPoint
+            lastTrackedDriverLocation = newPoint
+            lastNavigationUpdateMillis = nowMillis
+            initialStraightLineToDestMeters = GeoUtils.haversineMeters(
+                newPoint.latitude,
+                newPoint.longitude,
+                activeRoute.destination.latitude,
+                activeRoute.destination.longitude
+            ).coerceAtLeast(50.0)
+            _uiState.update { it.copy(currentLocation = newPoint) }
+            return
+        }
+
+        val dtSeconds = if (lastNavigationUpdateMillis > 0L) {
+            ((nowMillis - lastNavigationUpdateMillis).coerceIn(200L, 4000L)) / 1000.0
+        } else {
+            0.5
+        }
+        val speedStepMeters = if (newPoint.speedMps >= 0.35f) (newPoint.speedMps * dtSeconds) else 0.0
+        val stepMeters = max(if (coordStepMeters >= 0.25) coordStepMeters else 0.0, speedStepMeters)
+
+        if (stepMeters > 0.0) {
+            cumulativeTravelledMeters += stepMeters
+            activeTravelElapsedSeconds += max(1, dtSeconds.roundToInt())
+            lastTrackedDriverLocation = newPoint
+        }
+        lastNavigationUpdateMillis = nowMillis
+
+        val distFromOriginMeters = GeoUtils.haversineMeters(navigationOriginLocation, newPoint)
+            .let { if (it <= 35_000.0) it else 0.0 }
+
+        val currentStraightLineToDest = GeoUtils.haversineMeters(
+            newPoint.latitude,
+            newPoint.longitude,
+            activeRoute.destination.latitude,
+            activeRoute.destination.longitude
+        )
+        val straightLineSavedMeters = if (
+            initialStraightLineToDestMeters > 10.0 &&
+            currentStraightLineToDest < initialStraightLineToDestMeters
+        ) {
+            (initialStraightLineToDestMeters - currentStraightLineToDest) *
+                (initialRouteTotalDistanceMeters / initialStraightLineToDestMeters)
+        } else {
+            0.0
+        }
+
+        val polylineRem = GeoUtils.computeRemainingPolylineDistanceMeters(
+            newPoint,
+            activeRoute.points,
+            initialRouteTotalDistanceMeters
+        )
+        val polylineSavedMeters = if (polylineRem != null) {
+            (initialRouteTotalDistanceMeters - polylineRem).coerceAtLeast(0.0)
+        } else {
+            0.0
+        }
+
+        val totalCoveredMeters = maxOf(
+            cumulativeTravelledMeters,
+            distFromOriginMeters,
+            straightLineSavedMeters,
+            polylineSavedMeters
+        ).coerceIn(0.0, initialRouteTotalDistanceMeters)
+
+        val candidateRemMeters = (initialRouteTotalDistanceMeters - totalCoveredMeters).coerceAtLeast(0.0)
+        val remMeters = kotlin.math.min(state.remainingDistanceMeters, candidateRemMeters).coerceAtLeast(0.0)
+
         // 1. Check arrival at destination
-        if (routeImpactDetector.hasArrivedAtDestination(
+        if (remMeters <= 25.0 || routeImpactDetector.hasArrivedAtDestination(
                 newPoint,
                 activeRoute.destination.latitude,
                 activeRoute.destination.longitude
@@ -286,27 +385,116 @@ class RoutePilotViewModel(
             return
         }
 
-        // 2. Update remaining distance and ETA based on driver progress along route
-        val distToDest = GeoUtils.haversineMeters(
-            newPoint.latitude,
-            newPoint.longitude,
-            activeRoute.destination.latitude,
-            activeRoute.destination.longitude
-        ) * 1.25
-        val ratio = (distToDest / max(100.0, activeRoute.totalDistanceMeters)).coerceIn(0.05, 1.0)
-        val remMeters = activeRoute.totalDistanceMeters * ratio
-        val remMins = max(1, (activeRoute.durationMinutes * ratio).roundToInt())
+        // 2. Compute live remaining time in seconds & minutes
+        val distRatioRemaining = (remMeters / max(1.0, initialRouteTotalDistanceMeters)).coerceIn(0.0, 1.0)
+        val timeByDistRatioSecs = (initialRouteDurationSeconds * distRatioRemaining).roundToInt()
+        val timeByElapsedSecs = (initialRouteDurationSeconds - activeTravelElapsedSeconds).coerceAtLeast(1)
+        val speedBlendedSecs = if (newPoint.speedMps >= 2.0f) {
+            ((remMeters / newPoint.speedMps) * 0.35 + timeByDistRatioSecs * 0.65).roundToInt()
+        } else {
+            timeByDistRatioSecs
+        }
+        val candidateRemSecs = minOf(timeByDistRatioSecs, timeByElapsedSecs, speedBlendedSecs).coerceAtLeast(1)
+        val remSecs = kotlin.math.min(state.remainingEtaSeconds, candidateRemSecs).coerceAtLeast(1)
+        val remMins = max(1, (remSecs + 30) / 60)
+
+        // 3. Update live distance & instruction to next turn along route segments
+        val (turnDistMeters, turnInstr, turnManeuver) = computeLiveTurnGuidance(
+            route = activeRoute,
+            totalCoveredMeters = totalCoveredMeters,
+            fallbackDistance = state.currentTurnDistanceMeters,
+            fallbackInstruction = state.currentTurnInstruction,
+            fallbackManeuver = state.currentTurnManeuver
+        )
+
+        // 4. Advance position along route polyline when moving near origin so arrow & route progress in sync
+        val effectiveDriverPoint = interpolateDriverPointAlongRouteIfIndoorStep(
+            rawPoint = newPoint,
+            route = activeRoute,
+            totalCoveredMeters = totalCoveredMeters
+        )
 
         _uiState.update {
             it.copy(
-                currentLocation = newPoint,
+                currentLocation = effectiveDriverPoint,
                 remainingDistanceMeters = remMeters,
-                remainingEtaMinutes = remMins
+                remainingEtaMinutes = remMins,
+                remainingEtaSeconds = remSecs,
+                currentTurnDistanceMeters = turnDistMeters,
+                currentTurnInstruction = turnInstr,
+                currentTurnManeuver = turnManeuver
             )
         }
 
-        // 3. Re-check hazard impact at the new location
+        // 5. Re-check hazard impact at the new location
         evaluateActiveNavigationAgainstHazards(state.activeHazards)
+    }
+
+    private fun computeLiveTurnGuidance(
+        route: Route,
+        totalCoveredMeters: Double,
+        fallbackDistance: Double,
+        fallbackInstruction: String,
+        fallbackManeuver: String
+    ): Triple<Double, String, String> {
+        val segments = route.segments
+        if (segments.isEmpty()) {
+            val updatedDist = (fallbackDistance - (totalCoveredMeters % 500.0)).coerceAtLeast(10.0)
+            return Triple(updatedDist, fallbackInstruction, fallbackManeuver)
+        }
+        var accumulated = 0.0
+        for (i in segments.indices) {
+            val seg = segments[i]
+            val segLen = seg.distanceMeters.coerceAtLeast(25.0)
+            if (accumulated + segLen > totalCoveredMeters) {
+                val remInSeg = (accumulated + segLen - totalCoveredMeters).coerceAtLeast(5.0)
+                val targetSeg = segments.getOrNull(i + 1) ?: seg
+                val instruction = targetSeg.instruction.ifBlank { seg.instruction.ifBlank { fallbackInstruction } }
+                val maneuver = targetSeg.maneuverType.ifBlank { seg.maneuverType.ifBlank { fallbackManeuver } }
+                return Triple(remInSeg, instruction, maneuver)
+            }
+            accumulated += segLen
+        }
+        val lastSeg = segments.last()
+        val remToDest = (initialRouteTotalDistanceMeters - totalCoveredMeters).coerceAtLeast(5.0)
+        return Triple(remToDest, lastSeg.instruction.ifBlank { "Arrive at destination" }, lastSeg.maneuverType)
+    }
+
+    private fun interpolateDriverPointAlongRouteIfIndoorStep(
+        rawPoint: LocationPoint,
+        route: Route,
+        totalCoveredMeters: Double
+    ): LocationPoint {
+        val pts = route.points
+        if (pts.size < 2 || totalCoveredMeters <= 0.5) return rawPoint
+        val distToStart = GeoUtils.haversineMeters(rawPoint, pts.first())
+        // If user is walking near the start point (e.g. indoor testing), advance smoothly along route points
+        if (distToStart > 180.0) return rawPoint
+
+        var totalPolyLen = 0.0
+        for (i in 0 until pts.size - 1) {
+            totalPolyLen += GeoUtils.haversineMeters(pts[i], pts[i + 1])
+        }
+        if (totalPolyLen <= 1.0) return rawPoint
+
+        val targetPolyDist = (totalCoveredMeters * (totalPolyLen / max(1.0, initialRouteTotalDistanceMeters)))
+            .coerceIn(0.0, totalPolyLen)
+
+        var walked = 0.0
+        for (i in 0 until pts.size - 1) {
+            val a = pts[i]
+            val b = pts[i + 1]
+            val segLen = GeoUtils.haversineMeters(a, b)
+            if (walked + segLen >= targetPolyDist && segLen > 0.1) {
+                val frac = ((targetPolyDist - walked) / segLen).coerceIn(0.0, 1.0)
+                return rawPoint.copy(
+                    latitude = a.latitude + (b.latitude - a.latitude) * frac,
+                    longitude = a.longitude + (b.longitude - a.longitude) * frac
+                )
+            }
+            walked += segLen
+        }
+        return rawPoint
     }
 
     /**
@@ -457,6 +645,7 @@ class RoutePilotViewModel(
                 return@launch
             }
 
+            resetNavigationProgressBaseline(chosenOtherRoute, origin)
             val nextSegment = chosenOtherRoute.segments.firstOrNull()
             _uiState.update {
                 it.copy(
@@ -467,6 +656,7 @@ class RoutePilotViewModel(
                     isUsingAlternateInPreview = false,
                     remainingDistanceMeters = chosenOtherRoute.totalDistanceMeters,
                     remainingEtaMinutes = chosenOtherRoute.durationMinutes,
+                    remainingEtaSeconds = max(60, chosenOtherRoute.durationMinutes * 60),
                     currentTurnDistanceMeters = 350.0,
                     currentTurnInstruction = nextSegment?.instruction ?: "Continue onto safer route",
                     currentTurnManeuver = nextSegment?.maneuverType ?: "LEFT",
@@ -722,6 +912,7 @@ class RoutePilotViewModel(
             val alt = calcResult.alternateRoute
             if (rec != null) {
                 initialPrimaryRoute = rec
+                resetNavigationProgressBaseline(rec, _uiState.value.currentLocation)
                 val alignedHazards = alignHazardsWithRoutePath(rawBackendHazards.ifEmpty { _uiState.value.activeHazards }, rec)
                 val impact = routeImpactDetector.analyzeRouteImpact(
                     currentLocation = _uiState.value.currentLocation,
@@ -739,6 +930,7 @@ class RoutePilotViewModel(
                         activeHazards = alignedHazards,
                         remainingDistanceMeters = rec.totalDistanceMeters,
                         remainingEtaMinutes = rec.durationMinutes,
+                        remainingEtaSeconds = max(60, rec.durationMinutes * 60),
                         relevantHazardsOnRoute = impact.allRelevantHazards,
                         primaryAffectingHazard = impact.primaryAffectingHazard
                     )
@@ -763,6 +955,7 @@ class RoutePilotViewModel(
             state.recommendedRoute
         } ?: return
 
+        resetNavigationProgressBaseline(chosen, state.currentLocation)
         val impact = routeImpactDetector.analyzeRouteImpact(
             currentLocation = state.currentLocation,
             activeRoute = chosen,
@@ -775,6 +968,7 @@ class RoutePilotViewModel(
                 activeRoute = chosen,
                 remainingDistanceMeters = chosen.totalDistanceMeters,
                 remainingEtaMinutes = chosen.durationMinutes,
+                remainingEtaSeconds = max(60, chosen.durationMinutes * 60),
                 relevantHazardsOnRoute = impact.allRelevantHazards,
                 primaryAffectingHazard = impact.primaryAffectingHazard
             )
@@ -789,6 +983,8 @@ class RoutePilotViewModel(
         val route = _uiState.value.activeRoute ?: _uiState.value.recommendedRoute ?: return
         navigationStartTimestamp = System.currentTimeMillis()
         handledHazardIdsForCurrentRoute.clear()
+        resetNavigationProgressBaseline(route, _uiState.value.currentLocation)
+        startContinuousGpsListening()
 
         val firstSeg = route.segments.getOrNull(1) ?: route.segments.firstOrNull()
         val initialInstruction = firstSeg?.instruction ?: "Continue on main route"
@@ -800,6 +996,7 @@ class RoutePilotViewModel(
                 previousRouteBeforeDiversion = null,
                 remainingDistanceMeters = route.totalDistanceMeters,
                 remainingEtaMinutes = route.durationMinutes,
+                remainingEtaSeconds = max(60, route.durationMinutes * 60),
                 currentTurnDistanceMeters = firstSeg?.distanceMeters?.coerceAtMost(500.0) ?: 500.0,
                 currentTurnInstruction = initialInstruction,
                 currentTurnManeuver = firstSeg?.maneuverType ?: "RIGHT",

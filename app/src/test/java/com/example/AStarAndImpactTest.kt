@@ -136,4 +136,33 @@ class AStarAndImpactTest {
         assertNotNull("Safer diverted route must be found", saferRoute)
         assertTrue(saferRoute!!.isDivertedForSafety)
     }
+
+    @Test
+    fun `Remaining polyline distance and live remaining time decrease as driver travels along route`() {
+        val route = aStarEngine.calculateRoutes(
+            origin = origin,
+            destination = hospitalDestination,
+            activeHazards = emptyList()
+        ).recommendedRoute!!
+
+        val startRem = com.example.domain.routing.GeoUtils.computeRemainingPolylineDistanceMeters(
+            currentLocation = route.points.first(),
+            routePoints = route.points,
+            totalRouteMeters = route.totalDistanceMeters
+        )
+        val midRem = com.example.domain.routing.GeoUtils.computeRemainingPolylineDistanceMeters(
+            currentLocation = route.points[route.points.size / 2],
+            routePoints = route.points,
+            totalRouteMeters = route.totalDistanceMeters
+        )
+
+        assertNotNull(startRem)
+        assertNotNull(midRem)
+        assertTrue("Midpoint remaining distance ($midRem) must be less than start ($startRem)", midRem!! < startRem!!)
+        assertTrue(
+            "Live time formatting includes seconds when not on exact minute boundary",
+            com.example.domain.routing.GeoUtils.formatLiveRemainingTime(222).contains("3 min 42 s")
+        )
+    }
 }
+

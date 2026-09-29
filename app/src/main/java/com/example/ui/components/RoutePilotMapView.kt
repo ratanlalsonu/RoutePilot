@@ -118,6 +118,8 @@ fun RoutePilotMapView(
     primaryRoute: Route?,
     secondaryRoute: Route? = null,
     hazards: List<Hazard> = emptyList(),
+    remainingDistanceMeters: Double? = null,
+    remainingEtaSeconds: Int? = null,
     isNavigationMode: Boolean = false,
     isSaferGreenRoute: Boolean = false,
     isMapsApiKeyConfigured: Boolean = true,
@@ -242,11 +244,22 @@ fun RoutePilotMapView(
     val roadAnchorNodeBitmap = remember {
         createRoadEntryAnchorBitmap()
     }
-    val bestRouteCalloutBitmap = remember(primaryRoute?.id, primaryRoute?.durationMinutes, isGreenTheme) {
+    val liveCalloutDistText = remember(remainingDistanceMeters, primaryRoute?.totalDistanceMeters) {
+        val distM = remainingDistanceMeters ?: primaryRoute?.totalDistanceMeters ?: 0.0
+        GeoUtils.formatDistance(distM, useKilometers = true)
+    }
+    val liveCalloutTimeText = remember(remainingEtaSeconds, primaryRoute?.durationMinutes) {
+        if (remainingEtaSeconds != null) {
+            GeoUtils.formatLiveRemainingTime(remainingEtaSeconds)
+        } else {
+            "${primaryRoute?.durationMinutes ?: 0} min"
+        }
+    }
+    val bestRouteCalloutBitmap = remember(primaryRoute?.id, liveCalloutDistText, liveCalloutTimeText, isGreenTheme) {
         primaryRoute?.let {
             createRouteCalloutBadgeBitmap(
-                title = if (isGreenTheme) "Safer Route • ${it.durationMinutes} min" else "Best Route • ${it.durationMinutes} min",
-                subtitle = String.format(java.util.Locale.US, "%.1f km", it.distanceKm),
+                title = if (isGreenTheme) "Safer Route • $liveCalloutTimeText" else "Best Route • $liveCalloutTimeText",
+                subtitle = liveCalloutDistText,
                 isPrimary = true,
                 isGreenTheme = isGreenTheme
             )

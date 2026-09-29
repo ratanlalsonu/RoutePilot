@@ -253,6 +253,7 @@ fun RoutePilotAppRoot(
                         primaryAffectingHazard = uiState.primaryAffectingHazard,
                         remainingDistanceMeters = uiState.remainingDistanceMeters,
                         remainingEtaMinutes = uiState.remainingEtaMinutes,
+                        remainingEtaSeconds = uiState.remainingEtaSeconds,
                         currentTurnDistanceMeters = uiState.currentTurnDistanceMeters,
                         currentTurnInstruction = uiState.currentTurnInstruction,
                         currentTurnManeuver = uiState.currentTurnManeuver,
