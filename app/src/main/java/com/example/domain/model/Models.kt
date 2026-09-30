@@ -55,9 +55,9 @@ data class LocationPoint(
 
 @Immutable
 data class User(
-    val id: String,
-    val name: String,
-    val email: String,
+    val id: String = "",
+    val name: String = "",
+    val email: String = "",
     val languageCode: String = "en"
 )
 
@@ -133,13 +133,13 @@ data class Route(
 
 @Immutable
 data class Hazard(
-    val id: String,
-    val name: String,
-    val type: HazardType,
-    val severity: HazardSeverity,
-    val status: HazardStatus,
-    val latitude: Double,
-    val longitude: Double,
+    val id: String = "",
+    val name: String = "",
+    val type: HazardType = HazardType.BRIDGE_DAMAGE,
+    val severity: HazardSeverity = HazardSeverity.CRITICAL,
+    val status: HazardStatus = HazardStatus.BLOCKED,
+    val latitude: Double = 0.0,
+    val longitude: Double = 0.0,
     val radiusMeters: Double = 350.0,
     val description: String = "",
     val roadId: String? = null,
@@ -156,20 +156,20 @@ data class Hazard(
 
 @Immutable
 data class Journey(
-    val id: String,
-    val userId: String,
-    val sourceName: String,
-    val destinationName: String,
-    val destinationAddress: String,
-    val sourceLat: Double,
-    val sourceLng: Double,
-    val destLat: Double,
-    val destLng: Double,
-    val distanceKm: Double,
-    val durationMinutes: Int,
-    val startedAt: Long,
-    val completedAt: Long,
-    val status: String, // COMPLETED, SAFELY_DIVERTED, CANCELLED
+    val id: String = "",
+    val userId: String = "",
+    val sourceName: String = "",
+    val destinationName: String = "",
+    val destinationAddress: String = "",
+    val sourceLat: Double = 0.0,
+    val sourceLng: Double = 0.0,
+    val destLat: Double = 0.0,
+    val destLng: Double = 0.0,
+    val distanceKm: Double = 0.0,
+    val durationMinutes: Int = 0,
+    val startedAt: Long = 0L,
+    val completedAt: Long = 0L,
+    val status: String = "COMPLETED", // COMPLETED, SAFELY_DIVERTED, CANCELLED
     val hazardsAvoidedCount: Int = 0,
     val isDemoRecord: Boolean = false
 )

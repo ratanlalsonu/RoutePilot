@@ -1,0 +1,160 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isValidUserProfile(data) {
+      return data.uid is string && data.uid.size() >= 1 && data.uid.size() <= 128 &&
+             data.uid == request.auth.uid &&
+             data.name is string && data.name.size() >= 1 && data.name.size() <= 100 &&
+             data.email is string && data.email.size() >= 3 && data.email.size() <= 150 &&
+             data.authProvider is string && (data.authProvider == 'google' || data.authProvider == 'email') &&
+             (!('role' in data) || data.role == null || (data.role is string && data.role == 'user')) &&
+             data.createdAt is timestamp && data.createdAt <= request.time &&
+             data.updatedAt is timestamp && data.updatedAt <= request.time;
+    }
+
+    function isValidJourney(data) {
+      return data.userId is string && data.userId.size() >= 1 && data.userId.size() <= 128 &&
+             data.userId == request.auth.uid &&
+             data.source is string && data.source.size() >= 1 && data.source.size() <= 200 &&
+             data.destination is string && data.destination.size() >= 1 && data.destination.size() <= 200 &&
+             data.destinationAddress is string && data.destinationAddress.size() <= 300 &&
+             (data.distance is int || data.distance is float) && data.distance >= 0 && data.distance <= 100000 &&
+             data.duration is int && data.duration >= 0 && data.duration <= 100000 &&
+             data.startedAt is int && data.startedAt >= 0 &&
+             data.completedAt is int && data.completedAt >= 0 &&
+             data.status is string && data.status.size() >= 1 && data.status.size() <= 40 &&
+             data.hazardsAvoidedCount is int && data.hazardsAvoidedCount >= 0 && data.hazardsAvoidedCount <= 1000 &&
+             data.createdAt is timestamp && data.createdAt <= request.time &&
+             data.updatedAt is timestamp && data.updatedAt <= request.time;
+    }
+
+    function isValidHazard(data) {
+      return data.userId is string && data.userId.size() >= 1 && data.userId.size() <= 128 &&
+             data.userId == request.auth.uid &&
+             data.name is string && data.name.size() >= 1 && data.name.size() <= 150 &&
+             data.type is string && data.type.size() >= 1 && data.type.size() <= 50 &&
+             data.severity is string && data.severity.size() >= 1 && data.severity.size() <= 30 &&
+             data.status is string && data.status.size() >= 1 && data.status.size() <= 30 &&
+             (data.latitude is int || data.latitude is float) && data.latitude >= -90 && data.latitude <= 90 &&
+             (data.longitude is int || data.longitude is float) && data.longitude >= -180 && data.longitude <= 180 &&
+             (data.radius is int || data.radius is float) && data.radius >= 1 && data.radius <= 50000 &&
+             (!('description' in data) || data.description == null || (data.description is string && data.description.size() <= 500)) &&
+             (!('roadId' in data) || data.roadId == null || (data.roadId is string && data.roadId.size() <= 100)) &&
+             (!('bridgeId' in data) || data.bridgeId == null || (data.bridgeId is string && data.bridgeId is string && data.bridgeId.size() <= 100)) &&
+             data.active is bool &&
+             data.source is string && data.source.size() >= 1 && data.source.size() <= 50 &&
+             data.createdAt is timestamp && data.createdAt <= request.time &&
+             data.updatedAt is timestamp && data.updatedAt <= request.time;
+    }
+
+    match /users/{userId} {
+      allow get: if isSignedIn() && isValidId(userId) && request.auth.uid == userId;
+      allow list: if isSignedIn() && existing().uid == request.auth.uid;
+
+      allow create: if isSignedIn() &&
+                       isValidId(userId) &&
+                       request.auth.uid == userId &&
+                       incoming().keys().hasAll(['uid', 'name', 'email', 'authProvider', 'createdAt', 'updatedAt']) &&
+                       incoming().keys().hasOnly(['uid', 'name', 'email', 'authProvider', 'role', 'createdAt', 'updatedAt']) &&
+                       isValidUserProfile(incoming());
+
+      allow update: if isSignedIn() &&
+                       isValidId(userId) &&
+                       isValidUserProfile(incoming()) &&
+                       request.auth.uid == userId &&
+                       incoming().uid == existing().uid &&
+                       incoming().createdAt == existing().createdAt &&
+                       incoming().diff(existing()).affectedKeys().hasOnly(['name', 'email', 'authProvider', 'role', 'updatedAt']);
+
+      allow delete: if isSignedIn() && isValidId(userId) && request.auth.uid == userId;
+    }
+
+    match /journeys/{journeyId} {
+      allow get: if isSignedIn() && isValidId(journeyId) && existing().userId == request.auth.uid;
+      allow list: if isSignedIn() && existing().userId == request.auth.uid;
+
+      allow create: if isSignedIn() &&
+                       isValidId(journeyId) &&
+                       incoming().keys().hasAll([
+                         'userId', 'source', 'destination', 'destinationAddress',
+                         'distance', 'duration', 'startedAt', 'completedAt',
+                         'status', 'hazardsAvoidedCount', 'createdAt', 'updatedAt'
+                       ]) &&
+                       incoming().keys().hasOnly([
+                         'userId', 'source', 'destination', 'destinationAddress',
+                         'distance', 'duration', 'startedAt', 'completedAt',
+                         'status', 'hazardsAvoidedCount', 'createdAt', 'updatedAt'
+                       ]) &&
+                       isValidJourney(incoming());
+
+      allow update: if isSignedIn() &&
+                       isValidId(journeyId) &&
+                       isValidJourney(incoming()) &&
+                       existing().userId == request.auth.uid &&
+                       incoming().userId == existing().userId &&
+                       incoming().createdAt == existing().createdAt &&
+                       incoming().diff(existing()).affectedKeys().hasOnly([
+                         'source', 'destination', 'destinationAddress',
+                         'distance', 'duration', 'startedAt', 'completedAt',
+                         'status', 'hazardsAvoidedCount', 'updatedAt'
+                       ]);
+
+      allow delete: if isSignedIn() && isValidId(journeyId) && existing().userId == request.auth.uid;
+    }
+
+    match /hazards/{hazardId} {
+      allow get: if isSignedIn() && isValidId(hazardId) && (existing().active == true || existing().userId == request.auth.uid);
+      allow list: if isSignedIn() && existing().active == true;
+
+      allow create: if isSignedIn() &&
+                       isValidId(hazardId) &&
+                       incoming().keys().hasAll([
+                         'userId', 'name', 'type', 'severity', 'status',
+                         'latitude', 'longitude', 'radius', 'active', 'source',
+                         'createdAt', 'updatedAt'
+                       ]) &&
+                       incoming().keys().hasOnly([
+                         'userId', 'name', 'type', 'severity', 'status',
+                         'latitude', 'longitude', 'radius', 'description',
+                         'roadId', 'bridgeId', 'active', 'source',
+                         'createdAt', 'updatedAt'
+                       ]) &&
+                       isValidHazard(incoming());
+
+      allow update: if isSignedIn() &&
+                       isValidId(hazardId) &&
+                       isValidHazard(incoming()) &&
+                       existing().userId == request.auth.uid &&
+                       incoming().userId == existing().userId &&
+                       incoming().createdAt == existing().createdAt &&
+                       incoming().diff(existing()).affectedKeys().hasOnly([
+                         'name', 'type', 'severity', 'status',
+                         'latitude', 'longitude', 'radius', 'description',
+                         'roadId', 'bridgeId', 'active', 'source', 'updatedAt'
+                       ]);
+
+      allow delete: if isSignedIn() && isValidId(hazardId) && existing().userId == request.auth.uid;
+    }
+  }
+}

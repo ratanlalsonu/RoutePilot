@@ -1,0 +1,212 @@
+{
+  "entities": {
+    "UserProfile": {
+      "title": "UserProfile",
+      "description": "Authenticated user profile record stored per user UID. Clients must submit FieldValue.serverTimestamp() for createdAt and updatedAt.",
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "string",
+          "description": "Firebase Auth UID of the user."
+        },
+        "name": {
+          "type": "string",
+          "description": "Display name of the user (1 to 100 chars)."
+        },
+        "email": {
+          "type": "string",
+          "description": "Verified email address of the user (3 to 150 chars)."
+        },
+        "authProvider": {
+          "type": "string",
+          "enum": ["google", "email"],
+          "description": "Authentication provider used to sign in."
+        },
+        "role": {
+          "type": "string",
+          "enum": ["user"],
+          "description": "Standard user role."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when the user profile was first created via FieldValue.serverTimestamp()."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when the user profile was last updated via FieldValue.serverTimestamp()."
+        }
+      },
+      "required": ["uid", "name", "email", "authProvider", "createdAt", "updatedAt"]
+    },
+    "Journey": {
+      "title": "Journey",
+      "description": "Completed navigation journey record owned by an authenticated user. Clients must submit FieldValue.serverTimestamp() for createdAt and updatedAt.",
+      "type": "object",
+      "properties": {
+        "userId": {
+          "type": "string",
+          "description": "UID of the user who completed the journey."
+        },
+        "source": {
+          "type": "string",
+          "description": "Origin location label."
+        },
+        "destination": {
+          "type": "string",
+          "description": "Destination location name."
+        },
+        "destinationAddress": {
+          "type": "string",
+          "description": "Formatted address of the destination."
+        },
+        "distance": {
+          "type": "number",
+          "description": "Total distance traveled in kilometers."
+        },
+        "duration": {
+          "type": "integer",
+          "description": "Total duration in minutes."
+        },
+        "startedAt": {
+          "type": "integer",
+          "description": "Epoch milliseconds when navigation started."
+        },
+        "completedAt": {
+          "type": "integer",
+          "description": "Epoch milliseconds when navigation completed."
+        },
+        "status": {
+          "type": "string",
+          "description": "Journey completion status (e.g. COMPLETED, SAFELY_DIVERTED)."
+        },
+        "hazardsAvoidedCount": {
+          "type": "integer",
+          "description": "Number of road/bridge hazards avoided."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when the journey was saved via FieldValue.serverTimestamp()."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when the journey was updated via FieldValue.serverTimestamp()."
+        }
+      },
+      "required": [
+        "userId",
+        "source",
+        "destination",
+        "destinationAddress",
+        "distance",
+        "duration",
+        "startedAt",
+        "completedAt",
+        "status",
+        "hazardsAvoidedCount",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "Hazard": {
+      "title": "Hazard",
+      "description": "Active road or bridge hazard alert synced in real time. Clients must submit FieldValue.serverTimestamp() for createdAt and updatedAt.",
+      "type": "object",
+      "properties": {
+        "userId": {
+          "type": "string",
+          "description": "UID of the authenticated creator/reporter."
+        },
+        "name": {
+          "type": "string",
+          "description": "Display name of the road or bridge hazard."
+        },
+        "type": {
+          "type": "string",
+          "description": "Hazard type identifier (e.g. BRIDGE_DAMAGE, FLOODING, CONSTRUCTION)."
+        },
+        "severity": {
+          "type": "string",
+          "description": "Hazard severity level (e.g. CRITICAL, HIGH, MEDIUM, LOW)."
+        },
+        "status": {
+          "type": "string",
+          "description": "Hazard status (e.g. BLOCKED, WARNING, RESOLVED)."
+        },
+        "latitude": {
+          "type": "number",
+          "description": "Geographic latitude (-90 to 90)."
+        },
+        "longitude": {
+          "type": "number",
+          "description": "Geographic longitude (-180 to 180)."
+        },
+        "radius": {
+          "type": "number",
+          "description": "Hazard safety radius in meters."
+        },
+        "description": {
+          "type": "string",
+          "description": "Detailed hazard description."
+        },
+        "roadId": {
+          "type": "string",
+          "description": "Optional road segment identifier."
+        },
+        "bridgeId": {
+          "type": "string",
+          "description": "Optional bridge identifier."
+        },
+        "active": {
+          "type": "boolean",
+          "description": "Whether the hazard is currently active."
+        },
+        "source": {
+          "type": "string",
+          "description": "Telemetry source identifier."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when the hazard was created via FieldValue.serverTimestamp()."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when the hazard was updated via FieldValue.serverTimestamp()."
+        }
+      },
+      "required": [
+        "userId",
+        "name",
+        "type",
+        "severity",
+        "status",
+        "latitude",
+        "longitude",
+        "radius",
+        "active",
+        "source",
+        "createdAt",
+        "updatedAt"
+      ]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": { "$ref": "#/entities/UserProfile" },
+      "description": "Per-user profile documents strictly isolated to the authenticated owner."
+    },
+    "/journeys/{journeyId}": {
+      "schema": { "$ref": "#/entities/Journey" },
+      "description": "User navigation journey history strictly isolated by userId."
+    },
+    "/hazards/{hazardId}": {
+      "schema": { "$ref": "#/entities/Hazard" },
+      "description": "Real-time road and bridge hazards readable by authenticated users when active == true."
+    }
+  }
+}

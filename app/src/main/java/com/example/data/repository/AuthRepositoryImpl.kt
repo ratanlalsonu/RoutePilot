@@ -1,31 +1,50 @@
 package com.example.data.repository
 
 import android.content.Context
+import android.util.Log
+import androidx.credentials.ClearCredentialStateRequest
+import androidx.credentials.CredentialManager
+import com.example.R
+import com.example.data.remote.OperationType
+import com.example.data.remote.handleFirestoreError
 import com.example.domain.model.User
 import com.example.domain.repository.AuthRepository
 import com.google.firebase.FirebaseApp
 import com.google.firebase.auth.FirebaseAuth
-import com.google.firebase.auth.UserProfileChangeRequest
+import com.google.firebase.auth.GoogleAuthProvider
+import com.google.firebase.firestore.DocumentSnapshot
+import com.google.firebase.firestore.FieldValue
 import com.google.firebase.firestore.FirebaseFirestore
 import com.google.firebase.firestore.SetOptions
+import com.google.firebase.firestore.snapshots
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.catch
+import kotlinx.coroutines.flow.emitAll
+import kotlinx.coroutines.flow.flow
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.tasks.await
 import org.json.JSONObject
 import java.util.Locale
 import java.util.UUID
 
 class AuthRepositoryImpl(
-    private val context: Context
+    private val context: Context,
+    private val providedFirestore: FirebaseFirestore? = null,
+    private val providedAuth: FirebaseAuth? = null
 ) : AuthRepository {
 
     private val accountPrefs by lazy {
         context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
     }
 
+    private val databaseId: String by lazy {
+        context.getString(R.string.firestore_database_id)
+    }
+
     private val firebaseAuth: FirebaseAuth? by lazy {
-        runCatching {
+        providedAuth ?: runCatching {
             if (FirebaseApp.getApps(context).isNotEmpty()) {
                 FirebaseAuth.getInstance()
             } else {
@@ -35,9 +54,9 @@ class AuthRepositoryImpl(
     }
 
     private val firestore: FirebaseFirestore? by lazy {
-        runCatching {
+        providedFirestore ?: runCatching {
             if (FirebaseApp.getApps(context).isNotEmpty()) {
-                FirebaseFirestore.getInstance()
+                FirebaseFirestore.getInstance(databaseId)
             } else {
                 null
             }
@@ -48,43 +67,44 @@ class AuthRepositoryImpl(
     override val currentUser: Flow<User?> = _currentUser.asStateFlow()
 
     init {
-        ensureDefaultAccountSeeded()
+        purgeLegacyDummyAccounts()
         restoreSavedSession()
     }
 
-    private fun ensureDefaultAccountSeeded() {
-        val defaultEmail = "user@routepilot.in"
-        val key = accountKey(defaultEmail)
-        if (!accountPrefs.contains(key)) {
-            saveLocalAccount(
-                uid = "usr_default_routepilot",
-                name = "RoutePilot User",
-                email = defaultEmail,
-                password = "routepilot123"
-            )
+    private fun requireUserId(): String {
+        return firebaseAuth?.currentUser?.uid
+            ?: throw IllegalStateException("User must be signed in with Google before accessing Firestore.")
+    }
+
+    private fun purgeLegacyDummyAccounts() {
+        val dummyEmails = listOf(
+            "user@routepilot.in",
+            "driver@routepilot.in",
+            "user.routepilot@gmail.com",
+            "kishan.kumar@gmail.com"
+        )
+        val activeEmail = accountPrefs.getString(KEY_ACTIVE_USER_EMAIL, null)
+        val editor = accountPrefs.edit()
+        dummyEmails.forEach { dummy ->
+            editor.remove(accountKey(dummy))
         }
-        val legacyEmail = "driver@routepilot.in"
-        if (!accountPrefs.contains(accountKey(legacyEmail))) {
-            saveLocalAccount(
-                uid = "usr_legacy_routepilot",
-                name = "RoutePilot User",
-                email = legacyEmail,
-                password = "driver123"
-            )
+        if (activeEmail != null && dummyEmails.any { it.equals(activeEmail, ignoreCase = true) }) {
+            editor.remove(KEY_ACTIVE_USER_EMAIL)
         }
+        editor.apply()
     }
 
     private fun restoreSavedSession() {
         val fbUser = firebaseAuth?.currentUser
-        if (fbUser != null && !fbUser.isAnonymous) {
-            val email = fbUser.email.orEmpty().replace(Regex("(?i)driver"), "user")
-            val localRecord = getLocalAccount(email)
+        if (fbUser != null) {
+            val email = fbUser.email.orEmpty().trim()
+            val localRecord = if (email.isNotBlank()) getLocalAccount(email) else null
             val resolvedName = fbUser.displayName?.takeIf { it.isNotBlank() }
                 ?: localRecord?.optString("name")?.takeIf { it.isNotBlank() }
-                ?: email.substringBefore("@").replaceFirstChar { it.uppercase() }.ifBlank { "User" }
+                ?: email.substringBefore("@").replaceFirstChar { it.uppercase() }.ifBlank { "Google User" }
             _currentUser.value = User(
                 id = fbUser.uid,
-                name = resolvedName.replace(Regex("(?i)driver"), "User").trim(),
+                name = resolvedName.trim(),
                 email = email
             )
             return
@@ -94,14 +114,11 @@ class AuthRepositoryImpl(
         if (!activeEmail.isNullOrBlank()) {
             val record = getLocalAccount(activeEmail)
             if (record != null) {
-                val sanitizedEmail = record.optString("email", activeEmail)
-                    .replace(Regex("(?i)driver"), "user")
+                val cleanEmail = record.optString("email", activeEmail).trim()
                 _currentUser.value = User(
-                    id = record.optString("uid", "usr_${sanitizedEmail.hashCode().toUInt()}"),
-                    name = record.optString("name", sanitizedEmail.substringBefore("@"))
-                        .replace(Regex("(?i)driver"), "User")
-                        .trim(),
-                    email = sanitizedEmail
+                    id = record.optString("uid", "usr_${cleanEmail.hashCode().toUInt()}"),
+                    name = record.optString("name", cleanEmail.substringBefore("@")).trim(),
+                    email = cleanEmail
                 )
             }
         }
@@ -120,38 +137,9 @@ class AuthRepositoryImpl(
             return Result.failure(IllegalArgumentException("Password must be at least 6 characters."))
         }
 
-        val auth = firebaseAuth
-        if (auth != null) {
-            return runCatching {
-                val res = auth.signInWithEmailAndPassword(cleanEmail, password).await()
-                val fbUser = res.user ?: throw IllegalStateException("Authentication failed.")
-                val profileName = fetchOrSyncUserInFirestore(
-                    uid = fbUser.uid,
-                    fallbackName = fbUser.displayName
-                        ?: getLocalAccount(cleanEmail)?.optString("name")
-                        ?: cleanEmail.substringBefore("@").replaceFirstChar { it.uppercase() },
-                    email = cleanEmail
-                )
-                val user = User(
-                    id = fbUser.uid,
-                    name = profileName,
-                    email = cleanEmail
-                )
-                saveLocalAccount(
-                    uid = user.id,
-                    name = user.name,
-                    email = cleanEmail,
-                    password = password
-                )
-                setActiveSession(if (rememberMe) cleanEmail else null)
-                _currentUser.value = user
-                user
-            }
-        }
-
         val localAccount = getLocalAccount(cleanEmail)
             ?: return Result.failure(
-                IllegalArgumentException("No account found for $cleanEmail. Please Sign Up first.")
+                IllegalArgumentException("No account found for $cleanEmail. Please Sign Up or Continue with Google.")
             )
 
         val storedPassword = localAccount.optString("password", "")
@@ -162,7 +150,7 @@ class AuthRepositoryImpl(
         }
 
         val user = User(
-            id = localAccount.optString("uid", "drv_${cleanEmail.hashCode().toUInt()}"),
+            id = localAccount.optString("uid", "usr_${cleanEmail.hashCode().toUInt()}"),
             name = localAccount.optString(
                 "name",
                 cleanEmail.substringBefore("@").replaceFirstChar { it.uppercase() }
@@ -193,47 +181,13 @@ class AuthRepositoryImpl(
             return Result.failure(IllegalArgumentException("Password must be at least 6 characters."))
         }
 
-        val auth = firebaseAuth
-        if (auth != null) {
-            return runCatching {
-                val res = auth.createUserWithEmailAndPassword(cleanEmail, password).await()
-                val fbUser = res.user ?: throw IllegalStateException("Account creation failed.")
-                runCatching {
-                    val profileUpdates = UserProfileChangeRequest.Builder()
-                        .setDisplayName(cleanName)
-                        .build()
-                    fbUser.updateProfile(profileUpdates).await()
-                }
-                saveUserToFirestore(
-                    uid = fbUser.uid,
-                    name = cleanName,
-                    email = cleanEmail,
-                    provider = "email"
-                )
-                val user = User(
-                    id = fbUser.uid,
-                    name = cleanName,
-                    email = cleanEmail
-                )
-                saveLocalAccount(
-                    uid = user.id,
-                    name = cleanName,
-                    email = cleanEmail,
-                    password = password
-                )
-                setActiveSession(cleanEmail)
-                _currentUser.value = user
-                user
-            }
-        }
-
         if (getLocalAccount(cleanEmail) != null) {
             return Result.failure(
                 IllegalArgumentException("An account with $cleanEmail already exists. Please Login instead.")
             )
         }
 
-        val uid = "drv_${UUID.randomUUID().toString().take(8)}"
+        val uid = "usr_${UUID.randomUUID().toString().replace("-", "").take(12)}"
         saveLocalAccount(
             uid = uid,
             name = cleanName,
@@ -255,46 +209,64 @@ class AuthRepositoryImpl(
         name: String,
         idToken: String?
     ): Result<User> {
-        val cleanEmail = email.trim().lowercase(Locale.ROOT)
-        if (cleanEmail.isBlank() || !cleanEmail.contains("@") || !cleanEmail.contains(".")) {
-            return Result.failure(IllegalArgumentException("Please select or enter a valid Google email address."))
-        }
-        val existingLocal = getLocalAccount(cleanEmail)
-        val cleanName = name.trim().ifBlank {
-            existingLocal?.optString("name")?.takeIf { it.isNotBlank() }
-                ?: cleanEmail.substringBefore("@")
-                    .split(".", "_", "-")
-                    .filter { it.isNotBlank() }
-                    .joinToString(" ") { part -> part.replaceFirstChar { it.uppercase() } }
-                    .ifBlank { "Google User" }
-        }.replace("Driver", "User").trim()
-        val uid = existingLocal?.optString("uid")?.takeIf { it.isNotBlank() }
-            ?: "google_usr_${cleanEmail.hashCode().toUInt()}"
+        return try {
+            val auth = firebaseAuth
+            if (!idToken.isNullOrBlank() && auth != null && auth.currentUser == null) {
+                val authCredential = GoogleAuthProvider.getCredential(idToken, null)
+                auth.signInWithCredential(authCredential).await()
+            }
 
-        runCatching {
-            saveUserToFirestore(
+            val fbUser = auth?.currentUser
+            val resolvedEmail = (fbUser?.email?.takeIf { it.isNotBlank() } ?: email)
+                .trim()
+                .lowercase(Locale.ROOT)
+
+            if (resolvedEmail.isBlank() || !resolvedEmail.contains("@") || !resolvedEmail.contains(".")) {
+                return Result.failure(IllegalArgumentException("Google account email could not be verified."))
+            }
+
+            val existingLocal = getLocalAccount(resolvedEmail)
+            val resolvedName = (fbUser?.displayName?.takeIf { it.isNotBlank() } ?: name.trim()).ifBlank {
+                existingLocal?.optString("name")?.takeIf { it.isNotBlank() }
+                    ?: resolvedEmail.substringBefore("@")
+                        .split(".", "_", "-")
+                        .filter { it.isNotBlank() }
+                        .joinToString(" ") { part -> part.replaceFirstChar { it.uppercase() } }
+                        .ifBlank { "Google User" }
+            }.trim()
+
+            val uid = fbUser?.uid?.takeIf { it.isNotBlank() }
+                ?: existingLocal?.optString("uid")?.takeIf { it.isNotBlank() }
+                ?: "google_usr_${resolvedEmail.hashCode().toUInt()}"
+
+            if (fbUser != null) {
+                saveUserToFirestore(
+                    uid = fbUser.uid,
+                    name = resolvedName,
+                    email = resolvedEmail,
+                    provider = "google"
+                )
+            }
+
+            saveLocalAccount(
                 uid = uid,
-                name = cleanName,
-                email = cleanEmail,
-                provider = "google"
+                name = resolvedName,
+                email = resolvedEmail,
+                password = existingLocal?.optString("password")?.takeIf { it.isNotBlank() } ?: "google_oauth_user"
             )
+            setActiveSession(resolvedEmail)
+
+            val user = User(
+                id = uid,
+                name = resolvedName,
+                email = resolvedEmail
+            )
+            _currentUser.value = user
+            Result.success(user)
+        } catch (e: Exception) {
+            Log.e("AuthRepository", "Google Sign-In failed", e)
+            Result.failure(e)
         }
-
-        saveLocalAccount(
-            uid = uid,
-            name = cleanName,
-            email = cleanEmail,
-            password = existingLocal?.optString("password")?.takeIf { it.isNotBlank() } ?: "google_oauth_user"
-        )
-        setActiveSession(cleanEmail)
-
-        val user = User(
-            id = uid,
-            name = cleanName,
-            email = cleanEmail
-        )
-        _currentUser.value = user
-        return Result.success(user)
     }
 
     override suspend fun sendPasswordReset(
@@ -307,20 +279,9 @@ class AuthRepositoryImpl(
         }
 
         val auth = firebaseAuth
-        if (auth != null) {
+        if (auth != null && newPassword.isNullOrBlank()) {
             return runCatching {
                 auth.sendPasswordResetEmail(cleanEmail).await()
-                if (!newPassword.isNullOrBlank() && newPassword.length >= 6) {
-                    val existing = getLocalAccount(cleanEmail)
-                    if (existing != null) {
-                        saveLocalAccount(
-                            uid = existing.optString("uid", "drv_${cleanEmail.hashCode().toUInt()}"),
-                            name = existing.optString("name", cleanEmail.substringBefore("@")),
-                            email = cleanEmail,
-                            password = newPassword
-                        )
-                    }
-                }
                 "Password reset email sent to $cleanEmail via Firebase Authentication."
             }
         }
@@ -337,7 +298,7 @@ class AuthRepositoryImpl(
                 )
             }
             saveLocalAccount(
-                uid = existing.optString("uid", "drv_${cleanEmail.hashCode().toUInt()}"),
+                uid = existing.optString("uid", "usr_${cleanEmail.hashCode().toUInt()}"),
                 name = existing.optString("name", cleanEmail.substringBefore("@")),
                 email = cleanEmail,
                 password = newPassword
@@ -350,56 +311,93 @@ class AuthRepositoryImpl(
 
     override suspend fun logout() {
         runCatching { firebaseAuth?.signOut() }
+        runCatching {
+            CredentialManager.create(context).clearCredentialState(ClearCredentialStateRequest())
+        }
         setActiveSession(null)
         _currentUser.value = null
     }
 
-    private suspend fun saveUserToFirestore(
-        uid: String,
+    suspend fun saveUserToFirestore(
+        uid: String = requireUserId(),
         name: String,
         email: String,
-        provider: String
-    ) {
-        val db = firestore ?: return
-        val now = System.currentTimeMillis()
-        val data = mapOf(
-            "uid" to uid,
-            "name" to name,
-            "email" to email,
-            "authProvider" to provider,
-            "role" to "user",
-            "updatedAt" to now,
-            "lastLoginAt" to now
-        )
-        runCatching {
-            db.collection("users")
-                .document(uid)
-                .set(data, SetOptions.merge())
-                .await()
+        provider: String = "google"
+    ): Result<String> {
+        val db = firestore ?: return Result.failure(IllegalStateException("Firestore not initialized"))
+        val path = "users/$uid"
+        return try {
+            val docRef = db.collection("users").document(uid)
+            val existingSnap = docRef.get().await()
+            if (existingSnap.exists()) {
+                val updateData = mapOf(
+                    "name" to name.take(100).ifBlank { "Google User" },
+                    "email" to email.take(150),
+                    "authProvider" to provider,
+                    "role" to "user",
+                    "updatedAt" to FieldValue.serverTimestamp()
+                )
+                docRef.set(updateData, SetOptions.merge()).await()
+            } else {
+                val createData = mapOf(
+                    "uid" to uid,
+                    "name" to name.take(100).ifBlank { "Google User" },
+                    "email" to email.take(150),
+                    "authProvider" to provider,
+                    "role" to "user",
+                    "createdAt" to FieldValue.serverTimestamp(),
+                    "updatedAt" to FieldValue.serverTimestamp()
+                )
+                docRef.set(createData).await()
+            }
+            Result.success(uid)
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.WRITE, path)
+            Result.failure(e)
         }
     }
 
-    private suspend fun fetchOrSyncUserInFirestore(
-        uid: String,
-        fallbackName: String,
-        email: String
-    ): String {
-        val db = firestore ?: return fallbackName
-        return runCatching {
-            val docRef = db.collection("users").document(uid)
-            val snap = docRef.get().await()
-            val storedName = snap.getString("name")?.takeIf { it.isNotBlank() } ?: fallbackName
-            docRef.set(
-                mapOf(
-                    "uid" to uid,
-                    "name" to storedName,
-                    "email" to email,
-                    "lastLoginAt" to System.currentTimeMillis()
-                ),
-                SetOptions.merge()
-            ).await()
-            storedName
-        }.getOrDefault(fallbackName)
+    suspend fun getUserProfileById(targetUserId: String): Result<User?> {
+        val db = firestore ?: return Result.failure(IllegalStateException("Firestore not initialized"))
+        val path = "users/$targetUserId"
+        return try {
+            val snap = db.collection("users").document(targetUserId).get().await()
+            if (snap.exists()) {
+                Result.success(snap.toDomainUser())
+            } else {
+                Result.success(null)
+            }
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.GET, path)
+            Result.failure(e)
+        }
+    }
+
+    fun observeUserProfile(): Flow<User?> = flow {
+        val db = firestore ?: throw IllegalStateException("Firestore not initialized")
+        val uid = requireUserId()
+        val path = "users/$uid"
+        emitAll(
+            db.collection("users").document(uid)
+                .snapshots()
+                .map { snapshot ->
+                    if (snapshot.exists()) snapshot.toDomainUser() else null
+                }
+                .catch { error ->
+                    if (error is Exception) {
+                        handleFirestoreError(error, OperationType.GET, path)
+                    }
+                    throw error
+                }
+        )
+    }
+
+    private fun DocumentSnapshot.toDomainUser(): User {
+        return User(
+            id = getString("uid") ?: id,
+            name = getString("name") ?: "Google User",
+            email = getString("email") ?: ""
+        )
     }
 
     private fun accountKey(email: String): String =
@@ -440,7 +438,7 @@ class AuthRepositoryImpl(
     }
 
     companion object {
-        private const val PREFS_NAME = "routepilot_driver_accounts"
+        private const val PREFS_NAME = "routepilot_user_accounts"
         private const val KEY_ACCOUNT_PREFIX = "account_"
         private const val KEY_ACTIVE_USER_EMAIL = "active_user_email"
     }

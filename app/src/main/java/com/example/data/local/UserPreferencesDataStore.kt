@@ -40,7 +40,17 @@ class UserPreferencesDataStore(
             operatingMode = OperatingMode.LIVE,
             rememberMe = prefs[Keys.REMEMBER_ME] ?: true,
             savedEmail = (prefs[Keys.SAVED_EMAIL] ?: "").let { saved ->
-                if (saved.contains("driver", ignoreCase = true)) "user@routepilot.in" else saved
+                val trimmed = saved.trim()
+                if (
+                    trimmed.contains("driver", ignoreCase = true) ||
+                    trimmed.equals("user@routepilot.in", ignoreCase = true) ||
+                    trimmed.equals("user.routepilot@gmail.com", ignoreCase = true) ||
+                    trimmed.equals("kishan.kumar@gmail.com", ignoreCase = true)
+                ) {
+                    ""
+                } else {
+                    trimmed
+                }
             }
         )
     }

@@ -1,5 +1,11 @@
 package com.example.ui.screens
 
+import android.app.Activity
+import android.content.Context
+import android.content.ContextWrapper
+import android.content.Intent
+import android.provider.Settings
+import android.util.Log
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -29,7 +35,6 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Email
 import androidx.compose.material.icons.outlined.Lock
 import androidx.compose.material.icons.outlined.Person
-import androidx.compose.material.icons.outlined.PersonAddAlt
 import androidx.compose.material.icons.outlined.Visibility
 import androidx.compose.material.icons.outlined.VisibilityOff
 import androidx.compose.material3.Button
@@ -38,6 +43,7 @@ import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CheckboxDefaults
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -49,16 +55,18 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.platform.testTag
@@ -67,27 +75,159 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
-import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.credentials.CredentialManager
+import androidx.credentials.CustomCredential
+import androidx.credentials.GetCredentialRequest
+import androidx.credentials.exceptions.GetCredentialCancellationException
+import androidx.credentials.exceptions.NoCredentialException
 import com.example.R
 import com.example.domain.model.OperatingMode
 import com.example.ui.components.RoutePilotBrandLogo
 import com.example.ui.theme.HazardRed
 import com.example.ui.theme.RoutePilotBlue
-import com.example.ui.theme.RoutePilotNavy
 import com.example.ui.theme.SurfaceBackground
+import com.google.android.libraries.identity.googleid.GetGoogleIdOption
+import com.google.android.libraries.identity.googleid.GetSignInWithGoogleOption
+import com.google.android.libraries.identity.googleid.GoogleIdTokenCredential
+import com.google.android.libraries.identity.googleid.GoogleIdTokenCredential.Companion.TYPE_GOOGLE_ID_TOKEN_CREDENTIAL
+import com.google.firebase.Firebase
+import com.google.firebase.auth.GoogleAuthProvider
+import com.google.firebase.auth.auth
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.tasks.await
 
-private data class GoogleAccountOption(
-    val name: String,
-    val email: String,
-    val badgeColor: Color
-)
+private tailrec fun Context.findActivity(): Activity? = when (this) {
+    is Activity -> this
+    is ContextWrapper -> baseContext.findActivity()
+    else -> null
+}
+
+/**
+ * Silent Auto-Sign-In on App Startup / Login Screen Launch.
+ * Uses a single GetGoogleIdOption in its own GetCredentialRequest.
+ */
+fun attemptAutoSignIn(
+    context: Context,
+    credentialManager: CredentialManager,
+    onAuthSuccess: (email: String, name: String, idToken: String?) -> Unit,
+    onUnauthenticated: () -> Unit,
+    scope: CoroutineScope
+) {
+    val currentUser = runCatching { Firebase.auth.currentUser }.getOrNull()
+    if (currentUser != null && !currentUser.email.isNullOrBlank()) {
+        onAuthSuccess(
+            currentUser.email.orEmpty(),
+            currentUser.displayName.orEmpty(),
+            null
+        )
+        return
+    }
+
+    val clientId = try {
+        context.getString(R.string.default_web_client_id)
+    } catch (e: Exception) {
+        onUnauthenticated()
+        return
+    }
+
+    val activityContext = context.findActivity() ?: context
+    val googleIdOption = GetGoogleIdOption.Builder()
+        .setFilterByAuthorizedAccounts(true)
+        .setServerClientId(clientId)
+        .setAutoSelectEnabled(true)
+        .build()
+
+    val request = GetCredentialRequest.Builder()
+        .addCredentialOption(googleIdOption)
+        .build()
+
+    scope.launch {
+        try {
+            val result = credentialManager.getCredential(activityContext, request)
+            val credential = result.credential
+            if (credential is CustomCredential && credential.type == TYPE_GOOGLE_ID_TOKEN_CREDENTIAL) {
+                val googleIdTokenCredential = GoogleIdTokenCredential.createFrom(credential.data)
+                val googleIdToken = googleIdTokenCredential.idToken
+                val authCredential = GoogleAuthProvider.getCredential(googleIdToken, null)
+                val authResult = Firebase.auth.signInWithCredential(authCredential).await()
+                val fbUser = authResult.user
+                val resolvedEmail = fbUser?.email?.takeIf { it.isNotBlank() } ?: googleIdTokenCredential.id
+                val resolvedName = fbUser?.displayName?.takeIf { it.isNotBlank() }
+                    ?: googleIdTokenCredential.displayName.orEmpty()
+                onAuthSuccess(resolvedEmail, resolvedName, googleIdToken)
+            } else {
+                onUnauthenticated()
+            }
+        } catch (e: Exception) {
+            onUnauthenticated()
+        }
+    }
+}
+
+/**
+ * Interactive Google Sign-In flow via Jetpack Credential Manager.
+ * Uses GetSignInWithGoogleOption in its own single-option GetCredentialRequest
+ * so the real Android system Google account chooser is presented.
+ */
+fun onGoogleSignInClicked(
+    context: Context,
+    credentialManager: CredentialManager,
+    onAuthSuccess: (email: String, name: String, idToken: String) -> Unit,
+    onAuthError: (String) -> Unit,
+    scope: CoroutineScope,
+    onAuthCancelled: () -> Unit = {},
+    onNoGoogleAccountOnDevice: () -> Unit = {}
+) {
+    val clientId = try {
+        context.getString(R.string.default_web_client_id)
+    } catch (e: Exception) {
+        onAuthError("Google Sign-In configuration missing: default_web_client_id not found")
+        return
+    }
+
+    val activityContext = context.findActivity() ?: context
+    val signInOption = GetSignInWithGoogleOption.Builder(serverClientId = clientId).build()
+    val request = GetCredentialRequest.Builder()
+        .addCredentialOption(signInOption)
+        .build()
+
+    scope.launch {
+        try {
+            val result = credentialManager.getCredential(activityContext, request)
+            val credential = result.credential
+            if (credential is CustomCredential && credential.type == TYPE_GOOGLE_ID_TOKEN_CREDENTIAL) {
+                val googleIdTokenCredential = GoogleIdTokenCredential.createFrom(credential.data)
+                val googleIdToken = googleIdTokenCredential.idToken
+                val authCredential = GoogleAuthProvider.getCredential(googleIdToken, null)
+                val authResult = Firebase.auth.signInWithCredential(authCredential).await()
+                val fbUser = authResult.user
+                val resolvedEmail = fbUser?.email?.takeIf { it.isNotBlank() } ?: googleIdTokenCredential.id
+                val resolvedName = fbUser?.displayName?.takeIf { it.isNotBlank() }
+                    ?: googleIdTokenCredential.displayName.orEmpty()
+                onAuthSuccess(resolvedEmail, resolvedName, googleIdToken)
+            } else {
+                onAuthError("Unexpected credential type returned from Google Sign-In.")
+            }
+        } catch (e: GetCredentialCancellationException) {
+            Log.w("Auth", "Google Sign-In cancelled or dismissed: ${e.message}", e)
+            onAuthCancelled()
+        } catch (e: NoCredentialException) {
+            Log.w("Auth", "No Google account found on device: ${e.message}", e)
+            onNoGoogleAccountOnDevice()
+        } catch (e: Exception) {
+            Log.e("Auth", "Google Sign-In failed", e)
+            onAuthError(e.localizedMessage ?: "Google Sign-In failed. Please try again.")
+        }
+    }
+}
 
 /**
  * SCREEN 2 — LOGIN & SIGN UP SCREEN
- * Provides full Login, Sign Up, Remember Me, Forgot Password, and Continue with Google
- * (with interactive in-window Google Account Picker overlay to select or add a Google email).
+ * Uses real Google Sign-In via Jetpack Credential Manager (`GetSignInWithGoogleOption`)
+ * and Firebase Authentication — with zero dummy email accounts.
  */
 @Composable
 fun LoginScreen(
@@ -99,65 +239,54 @@ fun LoginScreen(
     onToggleOperatingMode: () -> Unit,
     onLoginSubmit: (email: String, password: String, rememberMe: Boolean) -> Unit,
     onSignUpSubmit: (name: String, email: String, password: String) -> Unit,
-    onContinueWithGoogle: (email: String, name: String) -> Unit,
+    onContinueWithGoogle: (email: String, name: String, idToken: String?) -> Unit,
+    onAuthError: (String?) -> Unit = {},
     onForgotPassword: (email: String, newPassword: String?) -> Unit
 ) {
+    val context = LocalContext.current
+    val coroutineScope = rememberCoroutineScope()
+    val credentialManager = remember(context) { CredentialManager.create(context) }
     val focusManager = LocalFocusManager.current
     val keyboardController = LocalSoftwareKeyboardController.current
 
     val sanitizedInitialEmail = remember(initialEmail) {
         val trimmed = initialEmail.trim()
-        if (trimmed.contains("driver", ignoreCase = true)) "user@routepilot.in" else trimmed
+        if (
+            trimmed.contains("driver", ignoreCase = true) ||
+            trimmed.equals("user@routepilot.in", ignoreCase = true) ||
+            trimmed.equals("user.routepilot@gmail.com", ignoreCase = true) ||
+            trimmed.equals("kishan.kumar@gmail.com", ignoreCase = true)
+        ) {
+            ""
+        } else {
+            trimmed
+        }
     }
 
     var isSignUpMode by rememberSaveable { mutableStateOf(false) }
     var name by rememberSaveable { mutableStateOf("") }
-    var email by rememberSaveable { mutableStateOf(sanitizedInitialEmail.ifBlank { "user@routepilot.in" }) }
-    var password by rememberSaveable { mutableStateOf("routepilot123") }
+    var email by rememberSaveable { mutableStateOf(sanitizedInitialEmail) }
+    var password by rememberSaveable { mutableStateOf("") }
     var rememberMe by rememberSaveable { mutableStateOf(initialRememberMe) }
     var passwordVisible by rememberSaveable { mutableStateOf(false) }
+    var isGoogleLoading by rememberSaveable { mutableStateOf(false) }
+    var showAddDeviceGoogleAccountPrompt by rememberSaveable { mutableStateOf(false) }
 
     var showForgotDialog by rememberSaveable { mutableStateOf(false) }
     var resetEmailInput by rememberSaveable { mutableStateOf("") }
     var resetNewPasswordInput by rememberSaveable { mutableStateOf("") }
 
-    // Google Account Chooser state
-    var showGoogleAccountPicker by rememberSaveable { mutableStateOf(false) }
-    var isAddingCustomGoogleAccount by rememberSaveable { mutableStateOf(false) }
-    var customGoogleName by rememberSaveable { mutableStateOf("") }
-    var customGoogleEmail by rememberSaveable { mutableStateOf("") }
-    var customGoogleError by rememberSaveable { mutableStateOf<String?>(null) }
-
-    val googleAccounts = remember {
-        mutableStateListOf(
-            GoogleAccountOption(
-                name = "Ratan Kishan",
-                email = "ratankishan2525@gmail.com",
-                badgeColor = Color(0xFF1A73E8)
-            ),
-            GoogleAccountOption(
-                name = "RoutePilot User",
-                email = "user.routepilot@gmail.com",
-                badgeColor = Color(0xFF16894C)
-            ),
-            GoogleAccountOption(
-                name = "Kishan Kumar",
-                email = "kishan.kumar@gmail.com",
-                badgeColor = Color(0xFF9333EA)
-            )
-        ).apply {
-            val saved = sanitizedInitialEmail.trim()
-            if (saved.isNotBlank() && saved.contains("@") && none { it.email.equals(saved, ignoreCase = true) }) {
-                add(
-                    0,
-                    GoogleAccountOption(
-                        name = saved.substringBefore("@").replaceFirstChar { it.uppercase() },
-                        email = saved,
-                        badgeColor = Color(0xFFEA580C)
-                    )
-                )
-            }
-        }
+    // Attempt silent auto sign-in once when LoginScreen launches if user already authorized Google Sign-In
+    LaunchedEffect(Unit) {
+        attemptAutoSignIn(
+            context = context,
+            credentialManager = credentialManager,
+            onAuthSuccess = { resolvedEmail, resolvedName, idToken ->
+                onContinueWithGoogle(resolvedEmail, resolvedName, idToken)
+            },
+            onUnauthenticated = { },
+            scope = coroutineScope
+        )
     }
 
     Surface(
@@ -195,6 +324,65 @@ fun LoginScreen(
                             style = MaterialTheme.typography.bodyMedium,
                             modifier = Modifier.padding(12.dp)
                         )
+                    }
+                }
+
+                if (showAddDeviceGoogleAccountPrompt) {
+                    Card(
+                        colors = CardDefaults.cardColors(containerColor = Color(0xFFEFF6FF)),
+                        border = BorderStroke(1.dp, Color(0xFFBFDBFE)),
+                        shape = RoundedCornerShape(14.dp),
+                        modifier = Modifier
+                            .widthIn(max = 420.dp)
+                            .fillMaxWidth()
+                            .padding(bottom = 12.dp)
+                    ) {
+                        Column(
+                            modifier = Modifier.padding(14.dp),
+                            verticalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            Text(
+                                text = "No Google account is signed in on this device yet.",
+                                style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.Bold),
+                                color = Color(0xFF1E293B)
+                            )
+                            Text(
+                                text = "Add your Google account in Android Settings, then tap Continue with Google again.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = Color(0xFF475569)
+                            )
+                            Button(
+                                onClick = {
+                                    showAddDeviceGoogleAccountPrompt = false
+                                    runCatching {
+                                        val addAccountIntent = Intent(Settings.ACTION_ADD_ACCOUNT).apply {
+                                            putExtra(Settings.EXTRA_ACCOUNT_TYPES, arrayOf("com.google"))
+                                        }
+                                        context.findActivity()?.startActivity(addAccountIntent)
+                                            ?: context.startActivity(
+                                                addAccountIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                                            )
+                                    }.onFailure {
+                                        runCatching {
+                                            val settingsIntent = Intent(Settings.ACTION_SYNC_SETTINGS)
+                                            context.findActivity()?.startActivity(settingsIntent)
+                                                ?: context.startActivity(
+                                                    settingsIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                                                )
+                                        }
+                                    }
+                                },
+                                colors = ButtonDefaults.buttonColors(containerColor = RoutePilotBlue),
+                                shape = RoundedCornerShape(10.dp),
+                                modifier = Modifier.testTag("add_device_google_account_button")
+                            ) {
+                                Text(
+                                    text = "Add Google Account on Device",
+                                    color = Color.White,
+                                    fontWeight = FontWeight.SemiBold
+                                )
+                            }
+                        }
                     }
                 }
 
@@ -404,16 +592,36 @@ fun LoginScreen(
 
                     Spacer(modifier = Modifier.height(18.dp))
 
+                    // Real Google Sign-In button using Jetpack Credential Manager (GetSignInWithGoogleOption)
                     OutlinedButton(
                         onClick = {
                             focusManager.clearFocus()
                             keyboardController?.hide()
-                            isAddingCustomGoogleAccount = false
-                            customGoogleName = ""
-                            customGoogleEmail = ""
-                            customGoogleError = null
-                            showGoogleAccountPicker = true
+                            onAuthError(null)
+                            showAddDeviceGoogleAccountPrompt = false
+                            isGoogleLoading = true
+                            onGoogleSignInClicked(
+                                context = context,
+                                credentialManager = credentialManager,
+                                onAuthSuccess = { googleEmail, googleName, idToken ->
+                                    isGoogleLoading = false
+                                    onContinueWithGoogle(googleEmail, googleName, idToken)
+                                },
+                                onAuthError = { errorMsg ->
+                                    isGoogleLoading = false
+                                    onAuthError(errorMsg)
+                                },
+                                scope = coroutineScope,
+                                onAuthCancelled = {
+                                    isGoogleLoading = false
+                                },
+                                onNoGoogleAccountOnDevice = {
+                                    isGoogleLoading = false
+                                    showAddDeviceGoogleAccountPrompt = true
+                                }
+                            )
                         },
+                        enabled = !isGoogleLoading,
                         shape = RoundedCornerShape(14.dp),
                         border = BorderStroke(1.dp, Color(0xFFD8E0EC)),
                         colors = ButtonDefaults.outlinedButtonColors(containerColor = Color.White),
@@ -422,27 +630,42 @@ fun LoginScreen(
                             .height(54.dp)
                             .testTag("google_login_button")
                     ) {
-                        Box(
-                            modifier = Modifier
-                                .size(26.dp)
-                                .clip(CircleShape)
-                                .background(Color(0xFFF1F5F9)),
-                            contentAlignment = Alignment.Center
-                        ) {
-                            Text(
-                                text = "G",
-                                fontWeight = FontWeight.ExtraBold,
+                        if (isGoogleLoading) {
+                            CircularProgressIndicator(
+                                modifier = Modifier.size(22.dp),
                                 color = RoutePilotBlue,
-                                fontSize = 16.sp
+                                strokeWidth = 2.5.dp
+                            )
+                            Spacer(modifier = Modifier.width(10.dp))
+                            Text(
+                                text = stringResource(R.string.action_continue_google),
+                                color = Color(0xFF1E293B),
+                                fontWeight = FontWeight.SemiBold,
+                                fontSize = 15.sp
+                            )
+                        } else {
+                            Box(
+                                modifier = Modifier
+                                    .size(26.dp)
+                                    .clip(CircleShape)
+                                    .background(Color(0xFFF1F5F9)),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Text(
+                                    text = "G",
+                                    fontWeight = FontWeight.ExtraBold,
+                                    color = RoutePilotBlue,
+                                    fontSize = 16.sp
+                                )
+                            }
+                            Spacer(modifier = Modifier.width(10.dp))
+                            Text(
+                                text = stringResource(R.string.action_continue_google),
+                                color = Color(0xFF1E293B),
+                                fontWeight = FontWeight.SemiBold,
+                                fontSize = 15.sp
                             )
                         }
-                        Spacer(modifier = Modifier.width(10.dp))
-                        Text(
-                            text = stringResource(R.string.action_continue_google),
-                            color = Color(0xFF1E293B),
-                            fontWeight = FontWeight.SemiBold,
-                            fontSize = 15.sp
-                        )
                     }
 
                     Spacer(modifier = Modifier.height(24.dp))
@@ -476,321 +699,10 @@ fun LoginScreen(
                                     focusManager.clearFocus()
                                     keyboardController?.hide()
                                     isSignUpMode = !isSignUpMode
-                                    if (isSignUpMode && email == "user@routepilot.in") {
-                                        email = ""
-                                        password = ""
-                                    }
                                 }
                                 .padding(4.dp)
                                 .testTag("toggle_signup_mode")
                         )
-                    }
-                }
-            }
-
-            // In-Window Google Sign-In Account Picker Overlay (avoids cross-window IME FrameTracker timeouts)
-            if (showGoogleAccountPicker) {
-                Box(
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .background(Color.Black.copy(alpha = 0.48f))
-                        .clickable(
-                            interactionSource = remember { MutableInteractionSource() },
-                            indication = null
-                        ) {
-                            focusManager.clearFocus()
-                            keyboardController?.hide()
-                            showGoogleAccountPicker = false
-                            isAddingCustomGoogleAccount = false
-                            customGoogleError = null
-                        }
-                        .padding(horizontal = 24.dp),
-                    contentAlignment = Alignment.Center
-                ) {
-                    Surface(
-                        shape = RoundedCornerShape(24.dp),
-                        color = Color.White,
-                        tonalElevation = 6.dp,
-                        shadowElevation = 12.dp,
-                        modifier = Modifier
-                            .widthIn(max = 400.dp)
-                            .fillMaxWidth()
-                            .clickable(
-                                interactionSource = remember { MutableInteractionSource() },
-                                indication = null
-                            ) { }
-                            .testTag("google_account_picker_dialog")
-                    ) {
-                        Column(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(vertical = 22.dp),
-                            horizontalAlignment = Alignment.CenterHorizontally
-                        ) {
-                            Box(
-                                modifier = Modifier
-                                    .size(44.dp)
-                                    .clip(CircleShape)
-                                    .background(Color(0xFFEFF6FF)),
-                                contentAlignment = Alignment.Center
-                            ) {
-                                Text(
-                                    text = "G",
-                                    fontWeight = FontWeight.ExtraBold,
-                                    color = Color(0xFF1A73E8),
-                                    fontSize = 24.sp
-                                )
-                            }
-
-                            Spacer(modifier = Modifier.height(12.dp))
-
-                            Text(
-                                text = if (isAddingCustomGoogleAccount) {
-                                    "Sign in with Google"
-                                } else {
-                                    "Choose an account"
-                                },
-                                style = MaterialTheme.typography.titleLarge.copy(
-                                    fontWeight = FontWeight.Bold,
-                                    color = Color(0xFF1E293B)
-                                )
-                            )
-
-                            Spacer(modifier = Modifier.height(4.dp))
-
-                            Text(
-                                text = "to continue to RoutePilot",
-                                style = MaterialTheme.typography.bodyMedium,
-                                color = Color(0xFF64748B)
-                            )
-
-                            Spacer(modifier = Modifier.height(16.dp))
-                            HorizontalDivider(color = Color(0xFFE2E8F0))
-
-                            if (!isAddingCustomGoogleAccount) {
-                                googleAccounts.forEachIndexed { index, account ->
-                                    Row(
-                                        modifier = Modifier
-                                            .fillMaxWidth()
-                                            .clickable {
-                                                focusManager.clearFocus()
-                                                keyboardController?.hide()
-                                                showGoogleAccountPicker = false
-                                                onContinueWithGoogle(account.email, account.name)
-                                            }
-                                            .padding(horizontal = 22.dp, vertical = 13.dp)
-                                            .testTag("google_account_item_$index"),
-                                        verticalAlignment = Alignment.CenterVertically
-                                    ) {
-                                        Box(
-                                            modifier = Modifier
-                                                .size(40.dp)
-                                                .clip(CircleShape)
-                                                .background(account.badgeColor),
-                                            contentAlignment = Alignment.Center
-                                        ) {
-                                            Text(
-                                                text = account.name.firstOrNull()?.uppercase() ?: "G",
-                                                color = Color.White,
-                                                fontWeight = FontWeight.Bold,
-                                                fontSize = 16.sp
-                                            )
-                                        }
-
-                                        Spacer(modifier = Modifier.width(14.dp))
-
-                                        Column(modifier = Modifier.weight(1f)) {
-                                            Text(
-                                                text = account.name,
-                                                style = MaterialTheme.typography.bodyLarge.copy(
-                                                    fontWeight = FontWeight.SemiBold,
-                                                    color = Color(0xFF0F172A)
-                                                ),
-                                                maxLines = 1,
-                                                overflow = TextOverflow.Ellipsis
-                                            )
-                                            Text(
-                                                text = account.email,
-                                                style = MaterialTheme.typography.bodyMedium,
-                                                color = Color(0xFF64748B),
-                                                maxLines = 1,
-                                                overflow = TextOverflow.Ellipsis
-                                            )
-                                        }
-                                    }
-                                    HorizontalDivider(
-                                        modifier = Modifier.padding(horizontal = 22.dp),
-                                        color = Color(0xFFF1F5F9)
-                                    )
-                                }
-
-                                Row(
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .clickable {
-                                            customGoogleError = null
-                                            isAddingCustomGoogleAccount = true
-                                        }
-                                        .padding(horizontal = 22.dp, vertical = 14.dp)
-                                        .testTag("google_use_another_account"),
-                                    verticalAlignment = Alignment.CenterVertically
-                                ) {
-                                    Box(
-                                        modifier = Modifier
-                                            .size(40.dp)
-                                            .clip(CircleShape)
-                                            .background(Color(0xFFF1F5F9)),
-                                        contentAlignment = Alignment.Center
-                                    ) {
-                                        Icon(
-                                            imageVector = Icons.Outlined.PersonAddAlt,
-                                            contentDescription = "Use another account",
-                                            tint = Color(0xFF334155),
-                                            modifier = Modifier.size(20.dp)
-                                        )
-                                    }
-                                    Spacer(modifier = Modifier.width(14.dp))
-                                    Text(
-                                        text = "Use another account",
-                                        style = MaterialTheme.typography.bodyLarge.copy(
-                                            fontWeight = FontWeight.SemiBold,
-                                            color = Color(0xFF1E293B)
-                                        )
-                                    )
-                                }
-
-                                HorizontalDivider(color = Color(0xFFE2E8F0))
-                                Spacer(modifier = Modifier.height(10.dp))
-
-                                Row(
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .padding(horizontal = 20.dp),
-                                    horizontalArrangement = Arrangement.End
-                                ) {
-                                    TextButton(
-                                        onClick = {
-                                            focusManager.clearFocus()
-                                            keyboardController?.hide()
-                                            showGoogleAccountPicker = false
-                                        }
-                                    ) {
-                                        Text(
-                                            text = stringResource(R.string.action_cancel),
-                                            color = Color(0xFF64748B),
-                                            fontWeight = FontWeight.SemiBold
-                                        )
-                                    }
-                                }
-                            } else {
-                                Column(
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .padding(horizontal = 22.dp, vertical = 16.dp),
-                                    verticalArrangement = Arrangement.spacedBy(12.dp)
-                                ) {
-                                    if (customGoogleError != null) {
-                                        Text(
-                                            text = customGoogleError!!,
-                                            color = HazardRed,
-                                            style = MaterialTheme.typography.bodySmall
-                                        )
-                                    }
-
-                                    OutlinedTextField(
-                                        value = customGoogleEmail,
-                                        onValueChange = {
-                                            customGoogleEmail = it
-                                            customGoogleError = null
-                                        },
-                                        label = { Text("Google Email (e.g. name@gmail.com)") },
-                                        leadingIcon = {
-                                            Icon(
-                                                imageVector = Icons.Outlined.Email,
-                                                contentDescription = null
-                                            )
-                                        },
-                                        singleLine = true,
-                                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Email),
-                                        shape = RoundedCornerShape(12.dp),
-                                        modifier = Modifier
-                                            .fillMaxWidth()
-                                            .testTag("custom_google_email_input")
-                                    )
-
-                                    OutlinedTextField(
-                                        value = customGoogleName,
-                                        onValueChange = { customGoogleName = it },
-                                        label = { Text("Display Name (optional)") },
-                                        leadingIcon = {
-                                            Icon(
-                                                imageVector = Icons.Outlined.Person,
-                                                contentDescription = null
-                                            )
-                                        },
-                                        singleLine = true,
-                                        shape = RoundedCornerShape(12.dp),
-                                        modifier = Modifier
-                                            .fillMaxWidth()
-                                            .testTag("custom_google_name_input")
-                                    )
-
-                                    Row(
-                                        modifier = Modifier.fillMaxWidth(),
-                                        horizontalArrangement = Arrangement.SpaceBetween,
-                                        verticalAlignment = Alignment.CenterVertically
-                                    ) {
-                                        TextButton(
-                                            onClick = {
-                                                focusManager.clearFocus()
-                                                keyboardController?.hide()
-                                                isAddingCustomGoogleAccount = false
-                                                customGoogleError = null
-                                            }
-                                        ) {
-                                            Text(
-                                                text = "Back to accounts",
-                                                color = Color(0xFF475569)
-                                            )
-                                        }
-
-                                        Button(
-                                            onClick = {
-                                                val cleanMail = customGoogleEmail.trim()
-                                                if (cleanMail.isBlank() || !cleanMail.contains("@") || !cleanMail.contains(".")) {
-                                                    customGoogleError = "Please enter a valid Google email address."
-                                                } else {
-                                                    focusManager.clearFocus()
-                                                    keyboardController?.hide()
-                                                    val resolvedName = customGoogleName.trim().ifBlank {
-                                                        cleanMail.substringBefore("@")
-                                                            .replaceFirstChar { it.uppercase() }
-                                                    }
-                                                    if (googleAccounts.none { it.email.equals(cleanMail, ignoreCase = true) }) {
-                                                        googleAccounts.add(
-                                                            0,
-                                                            GoogleAccountOption(
-                                                                name = resolvedName,
-                                                                email = cleanMail,
-                                                                badgeColor = RoutePilotNavy
-                                                            )
-                                                        )
-                                                    }
-                                                    showGoogleAccountPicker = false
-                                                    isAddingCustomGoogleAccount = false
-                                                    onContinueWithGoogle(cleanMail, resolvedName)
-                                                }
-                                            },
-                                            colors = ButtonDefaults.buttonColors(containerColor = RoutePilotBlue),
-                                            shape = RoundedCornerShape(10.dp),
-                                            modifier = Modifier.testTag("confirm_custom_google_account")
-                                        ) {
-                                            Text("Continue", color = Color.White, fontWeight = FontWeight.Bold)
-                                        }
-                                    }
-                                }
-                            }
-                        }
                     }
                 }
             }
@@ -874,26 +786,23 @@ fun LoginScreen(
                                         showForgotDialog = false
                                     }
                                 ) {
-                                    Text(stringResource(R.string.action_cancel))
+                                    Text(stringResource(R.string.action_cancel), color = Color(0xFF64748B))
                                 }
                                 Spacer(modifier = Modifier.width(8.dp))
                                 Button(
                                     onClick = {
                                         focusManager.clearFocus()
                                         keyboardController?.hide()
-                                        val targetEmail = resetEmailInput.trim()
-                                        val targetNewPass = resetNewPasswordInput.takeIf { it.isNotBlank() }
-                                        onForgotPassword(targetEmail, targetNewPass)
-                                        if (targetNewPass != null && targetNewPass.length >= 6) {
-                                            email = targetEmail
-                                            password = targetNewPass
-                                        }
                                         showForgotDialog = false
+                                        onForgotPassword(
+                                            resetEmailInput,
+                                            resetNewPasswordInput.takeIf { it.isNotBlank() }
+                                        )
                                     },
                                     colors = ButtonDefaults.buttonColors(containerColor = RoutePilotBlue),
-                                    modifier = Modifier.testTag("confirm_forgot_password_button")
+                                    modifier = Modifier.testTag("send_reset_button")
                                 ) {
-                                    Text("Reset Password", color = Color.White)
+                                    Text("Reset Password", color = Color.White, fontWeight = FontWeight.Bold)
                                 }
                             }
                         }

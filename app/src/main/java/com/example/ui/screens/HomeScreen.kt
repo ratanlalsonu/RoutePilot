@@ -21,37 +21,24 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.horizontalScroll
-import androidx.compose.foundation.rememberScrollState
 import androidx.compose.material.icons.Icons
-import androidx.compose.foundation.BorderStroke
-import androidx.compose.foundation.verticalScroll
-import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.AddBox
-import androidx.compose.material.icons.filled.Build
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.DeleteOutline
 import androidx.compose.material.icons.filled.DirectionsBus
 import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.Home
-import androidx.compose.material.icons.filled.LocalGasStation
 import androidx.compose.material.icons.filled.LocationOn
 import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.Mic
-import androidx.compose.material.icons.filled.Navigation
 import androidx.compose.material.icons.filled.Person
-import androidx.compose.material.icons.filled.Restaurant
 import androidx.compose.material.icons.filled.Restore
 import androidx.compose.material.icons.filled.School
 import androidx.compose.material.icons.filled.Search
-import androidx.compose.material.icons.filled.Settings
-import androidx.compose.material.icons.filled.Shield
 import androidx.compose.material.icons.filled.Train
-import androidx.compose.material.icons.filled.VerifiedUser
 import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material.icons.filled.Work
-import androidx.compose.ui.graphics.Brush
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
@@ -147,415 +134,95 @@ fun HomeScreen(
     ModalNavigationDrawer(
         drawerState = drawerState,
         drawerContent = {
-            val cleanUserName = currentUser?.name
-                ?.replace(Regex("(?i)driver"), "User")
-                ?.trim()
-                ?.ifBlank { "RoutePilot User" }
-                ?: "RoutePilot User"
-            val cleanUserEmail = currentUser?.email
-                ?.replace(Regex("(?i)driver"), "user")
-                ?: "user@routepilot.in"
-            val userInitials = cleanUserName
-                .split(" ")
-                .filter { it.isNotBlank() }
-                .take(2)
-                .joinToString("") { it.first().uppercase() }
-                .ifBlank { "RP" }
-
             ModalDrawerSheet(
-                drawerContainerColor = Color(0xFFF8FAFC),
-                drawerShape = RoundedCornerShape(topEnd = 26.dp, bottomEnd = 26.dp),
-                modifier = Modifier
-                    .width(318.dp)
-                    .testTag("home_navigation_drawer")
+                drawerContainerColor = Color.White,
+                modifier = Modifier.width(290.dp)
             ) {
                 Column(
                     modifier = Modifier
-                        .fillMaxSize()
-                        .verticalScroll(rememberScrollState())
+                        .fillMaxWidth()
+                        .background(RoutePilotNavy)
+                        .windowInsetsPadding(WindowInsets.statusBars)
+                        .padding(24.dp)
                 ) {
-                    // 1. Executive Gradient Profile & Live Telemetry Header
                     Box(
                         modifier = Modifier
-                            .fillMaxWidth()
-                            .background(
-                                brush = Brush.verticalGradient(
-                                    colors = listOf(
-                                        RoutePilotNavy,
-                                        Color(0xFF163B73),
-                                        Color(0xFF1D4ED8)
-                                    )
-                                )
-                            )
-                            .windowInsetsPadding(WindowInsets.statusBars)
-                            .padding(horizontal = 20.dp, vertical = 18.dp)
+                            .size(54.dp)
+                            .clip(CircleShape)
+                            .background(RoutePilotBlue),
+                        contentAlignment = Alignment.Center
                     ) {
-                        Column(modifier = Modifier.fillMaxWidth()) {
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.SpaceBetween,
-                                verticalAlignment = Alignment.Top
-                            ) {
-                                // Avatar with Initials & Online Indicator
-                                Box(
-                                    modifier = Modifier
-                                        .size(62.dp)
-                                        .clickable {
-                                            scope.launch { drawerState.close() }
-                                            onNavigateProfile()
-                                        }
-                                ) {
-                                    Surface(
-                                        shape = CircleShape,
-                                        color = Color.White.copy(alpha = 0.16f),
-                                        border = BorderStroke(2.dp, Color.White.copy(alpha = 0.85f)),
-                                        modifier = Modifier.fillMaxSize()
-                                    ) {
-                                        Box(contentAlignment = Alignment.Center) {
-                                            Text(
-                                                text = userInitials,
-                                                style = MaterialTheme.typography.titleLarge.copy(
-                                                    color = Color.White,
-                                                    fontWeight = FontWeight.ExtraBold,
-                                                    fontSize = 21.sp
-                                                )
-                                            )
-                                        }
-                                    }
-                                    Box(
-                                        modifier = Modifier
-                                            .size(16.dp)
-                                            .align(Alignment.BottomEnd)
-                                            .clip(CircleShape)
-                                            .background(Color.White)
-                                            .padding(2.dp)
-                                            .clip(CircleShape)
-                                            .background(SafeRouteGreen)
-                                    )
-                                }
-
-                                Row(
-                                    verticalAlignment = Alignment.CenterVertically,
-                                    horizontalArrangement = Arrangement.spacedBy(8.dp)
-                                ) {
-                                    Surface(
-                                        shape = RoundedCornerShape(50),
-                                        color = Color(0xFF22C55E).copy(alpha = 0.22f),
-                                        border = BorderStroke(1.dp, Color(0xFF4ADE80).copy(alpha = 0.55f))
-                                    ) {
-                                        Row(
-                                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp),
-                                            verticalAlignment = Alignment.CenterVertically
-                                        ) {
-                                            Icon(
-                                                imageVector = Icons.Default.VerifiedUser,
-                                                contentDescription = null,
-                                                tint = Color(0xFF4ADE80),
-                                                modifier = Modifier.size(13.dp)
-                                            )
-                                            Spacer(modifier = Modifier.width(4.dp))
-                                            Text(
-                                                text = "Verified",
-                                                style = MaterialTheme.typography.labelMedium.copy(
-                                                    color = Color.White,
-                                                    fontWeight = FontWeight.Bold,
-                                                    fontSize = 11.sp
-                                                )
-                                            )
-                                        }
-                                    }
-
-                                    IconButton(
-                                        onClick = { scope.launch { drawerState.close() } },
-                                        modifier = Modifier
-                                            .size(32.dp)
-                                            .clip(CircleShape)
-                                            .background(Color.White.copy(alpha = 0.14f))
-                                    ) {
-                                        Icon(
-                                            imageVector = Icons.Default.Close,
-                                            contentDescription = "Close Menu",
-                                            tint = Color.White,
-                                            modifier = Modifier.size(18.dp)
-                                        )
-                                    }
-                                }
-                            }
-
-                            Spacer(modifier = Modifier.height(12.dp))
-
-                            Text(
-                                text = cleanUserName,
-                                style = MaterialTheme.typography.titleLarge.copy(
-                                    color = Color.White,
-                                    fontWeight = FontWeight.ExtraBold,
-                                    fontSize = 20.sp
-                                ),
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis
-                            )
-                            Spacer(modifier = Modifier.height(2.dp))
-                            Text(
-                                text = cleanUserEmail,
-                                style = MaterialTheme.typography.bodyMedium.copy(
-                                    color = Color(0xFFDBEAFE),
-                                    fontSize = 13.sp
-                                ),
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis
-                            )
-
-                            Spacer(modifier = Modifier.height(14.dp))
-
-                            // 3-Column Quick Stats Strip inside Drawer Header
-                            Surface(
-                                shape = RoundedCornerShape(14.dp),
-                                color = Color.White.copy(alpha = 0.12f),
-                                border = BorderStroke(1.dp, Color.White.copy(alpha = 0.18f)),
-                                modifier = Modifier.fillMaxWidth()
-                            ) {
-                                Row(
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .padding(vertical = 10.dp, horizontal = 8.dp),
-                                    horizontalArrangement = Arrangement.SpaceEvenly,
-                                    verticalAlignment = Alignment.CenterVertically
-                                ) {
-                                    DrawerHeaderStatItem(
-                                        value = "${recentDestinations.size}",
-                                        label = "Saved Places"
-                                    )
-                                    Box(
-                                        modifier = Modifier
-                                            .width(1.dp)
-                                            .height(24.dp)
-                                            .background(Color.White.copy(alpha = 0.22f))
-                                    )
-                                    DrawerHeaderStatItem(
-                                        value = "Active",
-                                        label = "Hazard Shield"
-                                    )
-                                    Box(
-                                        modifier = Modifier
-                                            .width(1.dp)
-                                            .height(24.dp)
-                                            .background(Color.White.copy(alpha = 0.22f))
-                                    )
-                                    DrawerHeaderStatItem(
-                                        value = if (useKilometers) "KM" else "MI",
-                                        label = "Distance Unit"
-                                    )
-                                }
-                            }
-                        }
-                    }
-
-                    Spacer(modifier = Modifier.height(14.dp))
-
-                    // 2. Section: Navigation & Trips
-                    Text(
-                        text = "NAVIGATION & TRIPS",
-                        style = MaterialTheme.typography.labelMedium.copy(
-                            color = Color(0xFF64748B),
-                            fontWeight = FontWeight.ExtraBold,
-                            fontSize = 11.sp,
-                            letterSpacing = 0.8.sp
-                        ),
-                        modifier = Modifier.padding(horizontal = 20.dp, vertical = 4.dp)
-                    )
-
-                    DrawerMenuSectionCard(
-                        icon = Icons.Default.Navigation,
-                        iconTint = RoutePilotBlue,
-                        iconBg = RoutePilotBlueLight,
-                        title = stringResource(R.string.nav_navigate),
-                        subtitle = "Live map, quick destinations & safety radar",
-                        badgeText = "Active",
-                        selected = true,
-                        onClick = { scope.launch { drawerState.close() } }
-                    )
-
-                    DrawerMenuSectionCard(
-                        icon = Icons.Default.Search,
-                        iconTint = Color(0xFF0284C7),
-                        iconBg = Color(0xFFE0F2FE),
-                        title = stringResource(R.string.title_select_destination),
-                        subtitle = "Search any place, address or nearby category",
-                        onClick = {
-                            scope.launch { drawerState.close() }
-                            onOpenDestinationSearch()
-                        }
-                    )
-
-                    DrawerMenuSectionCard(
-                        icon = Icons.Default.History,
-                        iconTint = Color(0xFF7C3AED),
-                        iconBg = Color(0xFFEDE9FE),
-                        title = stringResource(R.string.nav_history),
-                        subtitle = "View completed trips, distance & avoided hazards",
-                        onClick = {
-                            scope.launch { drawerState.close() }
-                            onNavigateHistory()
-                        }
-                    )
-
-                    Spacer(modifier = Modifier.height(10.dp))
-
-                    // 3. Section: Quick Nearby Places (1-Tap Search from Sidebar)
-                    Text(
-                        text = "QUICK NEARBY PLACES",
-                        style = MaterialTheme.typography.labelMedium.copy(
-                            color = Color(0xFF64748B),
-                            fontWeight = FontWeight.ExtraBold,
-                            fontSize = 11.sp,
-                            letterSpacing = 0.8.sp
-                        ),
-                        modifier = Modifier.padding(horizontal = 20.dp, vertical = 4.dp)
-                    )
-
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .horizontalScroll(rememberScrollState())
-                            .padding(horizontal = 16.dp, vertical = 6.dp),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
-                    ) {
-                        DrawerQuickNearbyChip(
-                            icon = Icons.Default.AddBox,
-                            label = "Hospital",
-                            tint = Color(0xFFDC2626),
-                            onClick = {
-                                scope.launch { drawerState.close() }
-                                onSelectQuickCategory("HOSPITAL")
-                            }
-                        )
-                        DrawerQuickNearbyChip(
-                            icon = Icons.Default.LocalGasStation,
-                            label = "Petrol Pump",
-                            tint = Color(0xFFD97706),
-                            onClick = {
-                                scope.launch { drawerState.close() }
-                                onSelectQuickCategory("PETROL_PUMP")
-                            }
-                        )
-                        DrawerQuickNearbyChip(
-                            icon = Icons.Default.Build,
-                            label = "Service Centre",
-                            tint = RoutePilotBlue,
-                            onClick = {
-                                scope.launch { drawerState.close() }
-                                onSelectQuickCategory("SERVICE_CENTRE")
-                            }
-                        )
-                        DrawerQuickNearbyChip(
-                            icon = Icons.Default.School,
-                            label = "School",
-                            tint = Color(0xFF7C3AED),
-                            onClick = {
-                                scope.launch { drawerState.close() }
-                                onSelectQuickCategory("SCHOOL")
-                            }
-                        )
-                        DrawerQuickNearbyChip(
-                            icon = Icons.Default.Restaurant,
-                            label = "Restaurant",
-                            tint = SafeRouteGreen,
-                            onClick = {
-                                scope.launch { drawerState.close() }
-                                onSelectQuickCategory("RESTAURANT")
-                            }
+                        Icon(
+                            imageVector = Icons.Default.Person,
+                            contentDescription = "Profile",
+                            tint = Color.White,
+                            modifier = Modifier.size(30.dp)
                         )
                     }
-
-                    Spacer(modifier = Modifier.height(10.dp))
-
-                    // 4. Section: Account & Preferences
+                    Spacer(modifier = Modifier.height(12.dp))
                     Text(
-                        text = "ACCOUNT & PREFERENCES",
-                        style = MaterialTheme.typography.labelMedium.copy(
-                            color = Color(0xFF64748B),
-                            fontWeight = FontWeight.ExtraBold,
-                            fontSize = 11.sp,
-                            letterSpacing = 0.8.sp
-                        ),
-                        modifier = Modifier.padding(horizontal = 20.dp, vertical = 4.dp)
+                        text = currentUser?.name
+                            ?.replace(Regex("(?i)driver"), "User")
+                            ?.trim()
+                            ?.ifBlank { "RoutePilot User" }
+                            ?: "RoutePilot User",
+                        style = MaterialTheme.typography.titleLarge,
+                        color = Color.White
                     )
-
-                    DrawerMenuSectionCard(
-                        icon = Icons.Default.Person,
-                        iconTint = SafeRouteGreen,
-                        iconBg = Color(0xFFDCFCE7),
-                        title = stringResource(R.string.nav_profile),
-                        subtitle = "Account status, safety stats & sign out",
-                        onClick = {
-                            scope.launch { drawerState.close() }
-                            onNavigateProfile()
-                        }
-                    )
-
-                    DrawerMenuSectionCard(
-                        icon = Icons.Default.Settings,
-                        iconTint = Color(0xFFEA580C),
-                        iconBg = Color(0xFFFFEDD5),
-                        title = stringResource(R.string.nav_settings),
-                        subtitle = "Language (EN/HI), voice guidance & units",
-                        onClick = {
-                            scope.launch { drawerState.close() }
-                            onNavigateSettings()
-                        }
-                    )
-
-                    Spacer(modifier = Modifier.height(14.dp))
-
-                    // 5. IoT Safety Shield Status Card at Bottom of Sidebar
-                    Surface(
-                        shape = RoundedCornerShape(16.dp),
-                        color = Color(0xFFECFDF5),
-                        border = BorderStroke(1.dp, Color(0xFFA7F3D0)),
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(horizontal = 16.dp)
-                    ) {
-                        Row(
-                            modifier = Modifier.padding(horizontal = 14.dp, vertical = 12.dp),
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Box(
-                                modifier = Modifier
-                                    .size(36.dp)
-                                    .clip(CircleShape)
-                                    .background(SafeRouteGreen),
-                                contentAlignment = Alignment.Center
-                            ) {
-                                Icon(
-                                    imageVector = Icons.Default.Shield,
-                                    contentDescription = null,
-                                    tint = Color.White,
-                                    modifier = Modifier.size(20.dp)
-                                )
-                            }
-                            Spacer(modifier = Modifier.width(12.dp))
-                            Column(modifier = Modifier.weight(1f)) {
-                                Text(
-                                    text = "IoT Hazard Protection Active",
-                                    style = MaterialTheme.typography.labelLarge.copy(
-                                        color = Color(0xFF065F46),
-                                        fontWeight = FontWeight.ExtraBold
-                                    )
-                                )
-                                Text(
-                                    text = "Real-time bridge & road monitoring enabled",
-                                    style = MaterialTheme.typography.bodyMedium.copy(
-                                        color = Color(0xFF047857),
-                                        fontSize = 11.sp
-                                    )
-                                )
-                            }
-                        }
+                    val displayEmail = currentUser?.email?.trim().orEmpty()
+                    if (displayEmail.isNotBlank()) {
+                        Text(
+                            text = displayEmail,
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = Color(0xFFCBD5E1)
+                        )
                     }
-
-                    Spacer(modifier = Modifier.height(18.dp))
                 }
+
+                Spacer(modifier = Modifier.height(12.dp))
+
+                NavigationDrawerItem(
+                    label = { Text(stringResource(R.string.nav_navigate)) },
+                    selected = true,
+                    onClick = { scope.launch { drawerState.close() } },
+                    modifier = Modifier.padding(horizontal = 12.dp)
+                )
+                NavigationDrawerItem(
+                    label = { Text(stringResource(R.string.title_select_destination)) },
+                    selected = false,
+                    onClick = {
+                        scope.launch { drawerState.close() }
+                        onOpenDestinationSearch()
+                    },
+                    modifier = Modifier.padding(horizontal = 12.dp)
+                )
+                NavigationDrawerItem(
+                    label = { Text(stringResource(R.string.nav_history)) },
+                    selected = false,
+                    onClick = {
+                        scope.launch { drawerState.close() }
+                        onNavigateHistory()
+                    },
+                    modifier = Modifier.padding(horizontal = 12.dp)
+                )
+                NavigationDrawerItem(
+                    label = { Text(stringResource(R.string.nav_settings)) },
+                    selected = false,
+                    onClick = {
+                        scope.launch { drawerState.close() }
+                        onNavigateSettings()
+                    },
+                    modifier = Modifier.padding(horizontal = 12.dp)
+                )
+                NavigationDrawerItem(
+                    label = { Text(stringResource(R.string.nav_profile)) },
+                    selected = false,
+                    onClick = {
+                        scope.launch { drawerState.close() }
+                        onNavigateProfile()
+                    },
+                    modifier = Modifier.padding(horizontal = 12.dp)
+                )
             }
         }
     ) {
@@ -697,54 +364,7 @@ fun HomeScreen(
                     )
                 }
 
-                Spacer(modifier = Modifier.height(10.dp))
-
-                // Google Maps-Style Nearby Places Row: Service Centre | School | Petrol Pump | Restaurant
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .horizontalScroll(rememberScrollState()),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    listOf(
-                        Triple("Service Centre", Icons.Default.Build, Color(0xFF0284C7)),
-                        Triple("School", Icons.Default.School, Color(0xFF7C3AED)),
-                        Triple("Petrol Pump", Icons.Default.LocalGasStation, Color(0xFFEA580C)),
-                        Triple("Restaurant", Icons.Default.Restaurant, Color(0xFFD97706))
-                    ).forEach { (catLabel, catIcon, catTint) ->
-                        Surface(
-                            shape = RoundedCornerShape(50),
-                            color = Color.White,
-                            shadowElevation = 2.dp,
-                            modifier = Modifier
-                                .clickable { onSelectQuickCategory(catLabel) }
-                                .testTag("home_nearby_chip_${catLabel.lowercase().replace(" ", "_")}")
-                        ) {
-                            Row(
-                                modifier = Modifier.padding(horizontal = 12.dp, vertical = 7.dp),
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                Icon(
-                                    imageVector = catIcon,
-                                    contentDescription = null,
-                                    tint = catTint,
-                                    modifier = Modifier.size(16.dp)
-                                )
-                                Spacer(modifier = Modifier.width(6.dp))
-                                Text(
-                                    text = catLabel,
-                                    style = MaterialTheme.typography.labelMedium.copy(
-                                        fontWeight = FontWeight.Bold,
-                                        color = Color(0xFF1E293B),
-                                        fontSize = 12.sp
-                                    )
-                                )
-                            }
-                        }
-                    }
-                }
-
-                Spacer(modifier = Modifier.height(10.dp))
+                Spacer(modifier = Modifier.height(12.dp))
 
                 // Live Corridor Safety Status Strip
                 val effectiveHazardsCount = activeHazards.count { it.isEffectiveHazard }
@@ -1267,164 +887,6 @@ private fun RecentDestinationItemCard(
                     modifier = Modifier.size(21.dp)
                 )
             }
-        }
-    }
-}
-
-@Composable
-private fun DrawerHeaderStatItem(
-    value: String,
-    label: String
-) {
-    Column(horizontalAlignment = Alignment.CenterHorizontally) {
-        Text(
-            text = value,
-            style = MaterialTheme.typography.labelLarge.copy(
-                color = Color.White,
-                fontWeight = FontWeight.ExtraBold,
-                fontSize = 14.sp
-            )
-        )
-        Text(
-            text = label,
-            style = MaterialTheme.typography.labelMedium.copy(
-                color = Color(0xFFCBD5E1),
-                fontSize = 10.sp
-            )
-        )
-    }
-}
-
-@Composable
-private fun DrawerMenuSectionCard(
-    icon: ImageVector,
-    iconTint: Color,
-    iconBg: Color,
-    title: String,
-    subtitle: String,
-    badgeText: String? = null,
-    selected: Boolean = false,
-    onClick: () -> Unit
-) {
-    Surface(
-        shape = RoundedCornerShape(16.dp),
-        color = if (selected) Color(0xFFEFF6FF) else Color.White,
-        border = BorderStroke(
-            width = 1.dp,
-            color = if (selected) RoutePilotBlue.copy(alpha = 0.35f) else Color(0xFFE2E8F0)
-        ),
-        shadowElevation = if (selected) 2.dp else 1.dp,
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(horizontal = 14.dp, vertical = 4.dp)
-            .clickable(onClick = onClick)
-    ) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 12.dp, vertical = 11.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Box(
-                modifier = Modifier
-                    .size(42.dp)
-                    .clip(RoundedCornerShape(12.dp))
-                    .background(iconBg),
-                contentAlignment = Alignment.Center
-            ) {
-                Icon(
-                    imageVector = icon,
-                    contentDescription = title,
-                    tint = iconTint,
-                    modifier = Modifier.size(22.dp)
-                )
-            }
-
-            Spacer(modifier = Modifier.width(12.dp))
-
-            Column(modifier = Modifier.weight(1f)) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text(
-                        text = title,
-                        style = MaterialTheme.typography.bodyLarge.copy(
-                            fontWeight = FontWeight.ExtraBold,
-                            color = if (selected) RoutePilotBlue else Color(0xFF0F172A),
-                            fontSize = 15.sp
-                        )
-                    )
-                    if (badgeText != null) {
-                        Spacer(modifier = Modifier.width(8.dp))
-                        Surface(
-                            shape = RoundedCornerShape(50),
-                            color = RoutePilotBlue
-                        ) {
-                            Text(
-                                text = badgeText,
-                                style = MaterialTheme.typography.labelMedium.copy(
-                                    color = Color.White,
-                                    fontWeight = FontWeight.Bold,
-                                    fontSize = 10.sp
-                                ),
-                                modifier = Modifier.padding(horizontal = 7.dp, vertical = 2.dp)
-                            )
-                        }
-                    }
-                }
-                Spacer(modifier = Modifier.height(2.dp))
-                Text(
-                    text = subtitle,
-                    style = MaterialTheme.typography.bodyMedium.copy(
-                        color = Color(0xFF64748B),
-                        fontSize = 12.sp
-                    ),
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis
-                )
-            }
-
-            Icon(
-                imageVector = Icons.AutoMirrored.Filled.KeyboardArrowRight,
-                contentDescription = null,
-                tint = if (selected) RoutePilotBlue else Color(0xFF94A3B8),
-                modifier = Modifier.size(20.dp)
-            )
-        }
-    }
-}
-
-@Composable
-private fun DrawerQuickNearbyChip(
-    icon: ImageVector,
-    label: String,
-    tint: Color,
-    onClick: () -> Unit
-) {
-    Surface(
-        shape = RoundedCornerShape(12.dp),
-        color = Color.White,
-        border = BorderStroke(1.dp, Color(0xFFE2E8F0)),
-        shadowElevation = 1.dp,
-        modifier = Modifier.clickable(onClick = onClick)
-    ) {
-        Row(
-            modifier = Modifier.padding(horizontal = 11.dp, vertical = 8.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Icon(
-                imageVector = icon,
-                contentDescription = label,
-                tint = tint,
-                modifier = Modifier.size(16.dp)
-            )
-            Spacer(modifier = Modifier.width(6.dp))
-            Text(
-                text = label,
-                style = MaterialTheme.typography.labelMedium.copy(
-                    color = Color(0xFF0F172A),
-                    fontWeight = FontWeight.Bold,
-                    fontSize = 12.sp
-                )
-            )
         }
     }
 }
