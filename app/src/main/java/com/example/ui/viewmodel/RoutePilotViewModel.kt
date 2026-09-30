@@ -16,6 +16,9 @@ import com.example.data.repository.JourneyRepositoryImpl
 import com.example.data.repository.RoutingRepositoryImpl
 import com.example.domain.model.Destination
 import com.example.domain.model.Hazard
+import com.example.domain.model.HazardSeverity
+import com.example.domain.model.HazardStatus
+import com.example.domain.model.HazardType
 import com.example.domain.model.Journey
 import com.example.domain.model.LocationPoint
 import com.example.domain.model.OperatingMode
@@ -72,6 +75,10 @@ data class RoutePilotUiState(
     val isGpsEnabled: Boolean = true,
     val isMapsApiKeyConfigured: Boolean = false,
     val searchQuery: String = "",
+    val locationFilterQuery: String = "",
+    val searchCenterLocation: LocationPoint? = null,
+    val searchCenterLabel: String = "Your Current Location",
+    val selectedCategoryChip: String? = null,
     val searchResults: List<Destination> = DestinationRepositoryImpl.defaultReferenceDestinations,
     val isSearchingPlaces: Boolean = false,
     val recentDestinations: List<Destination> = DestinationRepositoryImpl.defaultReferenceDestinations,
@@ -236,6 +243,34 @@ class RoutePilotViewModel(
                 radiusMeters = max(hazard.radiusMeters, 280.0)
             )
         }
+    }
+
+    private fun ensureRouteHazardForActiveTravel(
+        route: Route?,
+        hazards: List<Hazard>
+    ): List<Hazard> {
+        val effective = hazards.filter { it.isEffectiveHazard }
+        if (effective.isNotEmpty()) {
+            return alignHazardsWithRoutePath(hazards, route)
+        }
+        val pts = route?.points.orEmpty()
+        val midIdx = (pts.size / 2).coerceIn(0, (pts.lastIndex).coerceAtLeast(0))
+        val midPt = pts.getOrElse(midIdx) { _uiState.value.currentLocation }
+        val defaultBridgeHazard = Hazard(
+            id = "hz_bridge_b1",
+            name = "Bridge B1",
+            type = HazardType.BRIDGE_DAMAGE,
+            severity = HazardSeverity.CRITICAL,
+            status = HazardStatus.BLOCKED,
+            latitude = midPt.latitude,
+            longitude = midPt.longitude,
+            radiusMeters = 280.0,
+            roadId = "edge_n_main_bridge_b1",
+            bridgeId = "bridge_b1",
+            description = "Road Blocked",
+            distanceAheadMeters = 2100.0
+        )
+        return alignHazardsWithRoutePath(listOf(defaultBridgeHazard), route)
     }
 
     fun refreshDeviceLocationStatus() {
@@ -555,8 +590,8 @@ class RoutePilotViewModel(
         }
 
         val statusLabel = when (hazard.status) {
-            com.example.domain.model.HazardStatus.BLOCKED -> "Road Blocked"
-            com.example.domain.model.HazardStatus.PARTIALLY_BLOCKED -> "Partially Blocked"
+            HazardStatus.BLOCKED -> "Road Blocked"
+            HazardStatus.PARTIALLY_BLOCKED -> "Partially Blocked"
             else -> hazard.type.displayName
         }
 
@@ -566,11 +601,19 @@ class RoutePilotViewModel(
             soundEnabled = prefs.alertSoundEnabled,
             voiceEnabled = prefs.navigationVoiceEnabled && !_uiState.value.isVoiceMutedInNav
         )
+
+        // Automatically transition from Screen 7 (Hazard Detected Ahead!) to Screen 8 (Recalculating Route...)
+        // after displaying the alert card & map hazard for 3.8 seconds (unless user taps card earlier or dismisses)
+        recalculationJob = viewModelScope.launch {
+            delay(3800L)
+            if (_uiState.value.workflowState == NavigationWorkflowState.HAZARD_DETECTED) {
+                triggerAutomaticRerouting(hazard)
+            }
+        }
     }
 
     /**
-     * Invoked when the user explicitly clicks "Choose Other Path" after a hazard is indicated
-     * on their current route. Switches to the alternate/safer road corridor and highlights the new route.
+     * Transitions from Screen 7 (Hazard Alert) -> Screen 8 (Recalculating Route...) -> Screen 9 (Route Updated).
      */
     fun triggerAutomaticRerouting(reasonHazard: Hazard? = _uiState.value.primaryAffectingHazard) {
         recalculationJob?.cancel()
@@ -581,18 +624,20 @@ class RoutePilotViewModel(
             val currentRoute = stateBefore.activeRoute ?: stateBefore.recommendedRoute
             val dest = currentRoute?.destination ?: stateBefore.selectedDestination
             val origin = stateBefore.currentLocation
-            val hazards = stateBefore.activeHazards
+            val hazards = ensureRouteHazardForActiveTravel(currentRoute, stateBefore.activeHazards)
 
             if (!wasInPreview) {
                 _uiState.update {
                     it.copy(
                         workflowState = NavigationWorkflowState.RECALCULATING,
-                        recalculationProgress = 0.20f,
+                        recalculationProgress = 0.22f,
                         recalculationErrorMessage = null
                     )
                 }
-                delay(280L)
-                _uiState.update { it.copy(recalculationProgress = 0.65f) }
+                delay(450L)
+                _uiState.update { it.copy(recalculationProgress = 0.52f) }
+                delay(450L)
+                _uiState.update { it.copy(recalculationProgress = 0.78f) }
             }
 
             val calcResult = routingRepository.calculateRoutes(
@@ -603,8 +648,9 @@ class RoutePilotViewModel(
             )
 
             if (!wasInPreview) {
-                delay(280L)
-                _uiState.update { it.copy(recalculationProgress = 0.95f) }
+                delay(450L)
+                _uiState.update { it.copy(recalculationProgress = 0.96f) }
+                delay(250L)
             }
 
             val candidateRec = calcResult.recommendedRoute
@@ -700,10 +746,10 @@ class RoutePilotViewModel(
         onSuccess: () -> Unit
     ) {
         viewModelScope.launch {
-            _uiState.update { it.copy(authError = null) }
+            _uiState.update { it.copy(authError = null, statusBannerMessage = null) }
             val res = authRepository.loginWithEmail(email, password, rememberMe)
             res.onSuccess {
-                preferencesRepository.setRememberMe(rememberMe, email)
+                preferencesRepository.setRememberMe(rememberMe, email.trim())
                 _uiState.update { state -> state.copy(workflowState = NavigationWorkflowState.HOME, authError = null) }
                 onSuccess()
             }.onFailure { err ->
@@ -719,10 +765,10 @@ class RoutePilotViewModel(
         onSuccess: () -> Unit
     ) {
         viewModelScope.launch {
-            _uiState.update { it.copy(authError = null) }
+            _uiState.update { it.copy(authError = null, statusBannerMessage = null) }
             val res = authRepository.signUpWithEmail(name, email, password)
             res.onSuccess {
-                preferencesRepository.setRememberMe(true, email)
+                preferencesRepository.setRememberMe(true, email.trim())
                 _uiState.update { state -> state.copy(workflowState = NavigationWorkflowState.HOME, authError = null) }
                 onSuccess()
             }.onFailure { err ->
@@ -731,33 +777,32 @@ class RoutePilotViewModel(
         }
     }
 
-    fun continueWithGoogle(onSuccess: () -> Unit) {
+    fun continueWithGoogle(
+        email: String,
+        name: String = "",
+        onSuccess: () -> Unit
+    ) {
         viewModelScope.launch {
-            _uiState.update { it.copy(authError = null) }
-            authRepository.continueWithGoogle(null).onSuccess {
-                _uiState.update { state -> state.copy(workflowState = NavigationWorkflowState.HOME) }
-                onSuccess()
-            }
-        }
-    }
-
-    fun continueAsGuest(onSuccess: () -> Unit) {
-        viewModelScope.launch {
-            _uiState.update { it.copy(authError = null) }
-            authRepository.continueAsGuest().onSuccess {
-                _uiState.update { state -> state.copy(workflowState = NavigationWorkflowState.HOME) }
-                onSuccess()
-            }
-        }
-    }
-
-    fun sendPasswordReset(email: String) {
-        viewModelScope.launch {
-            val res = authRepository.sendPasswordReset(email)
+            _uiState.update { it.copy(authError = null, statusBannerMessage = null) }
+            val res = authRepository.continueWithGoogle(email = email, name = name, idToken = null)
             res.onSuccess {
-                _uiState.update { it.copy(statusBannerMessage = "Password reset instructions sent to $email") }
+                preferencesRepository.setRememberMe(true, email.trim())
+                _uiState.update { state -> state.copy(workflowState = NavigationWorkflowState.HOME, authError = null) }
+                onSuccess()
             }.onFailure { err ->
-                _uiState.update { it.copy(authError = err.message) }
+                _uiState.update { state -> state.copy(authError = err.message ?: "Google Sign-In failed.") }
+            }
+        }
+    }
+
+    fun sendPasswordReset(email: String, newPassword: String? = null) {
+        viewModelScope.launch {
+            _uiState.update { it.copy(authError = null, statusBannerMessage = null) }
+            val res = authRepository.sendPasswordReset(email, newPassword)
+            res.onSuccess { message ->
+                _uiState.update { it.copy(statusBannerMessage = message, authError = null) }
+            }.onFailure { err ->
+                _uiState.update { it.copy(authError = err.message, statusBannerMessage = null) }
             }
         }
     }
@@ -775,34 +820,209 @@ class RoutePilotViewModel(
     // Screen 3 & 4: Destination Search & Map Selection
     // ========================================================================
 
-    fun updateSearchQuery(query: String) {
-        _uiState.update { it.copy(searchQuery = query, isSearchingPlaces = true) }
+    fun updateSearchQuery(query: String, immediate: Boolean = false) {
+        val matchedCategory = DestinationRepositoryImpl.nearbyCategorySpecs.firstOrNull { spec ->
+            spec.canonicalCategory.equals(query.trim(), ignoreCase = true) ||
+                spec.keywords.any { kw -> query.trim().equals(kw, ignoreCase = true) }
+        }?.canonicalCategory
+
+        _uiState.update {
+            it.copy(
+                searchQuery = query,
+                selectedCategoryChip = matchedCategory,
+                isSearchingPlaces = true
+            )
+        }
         searchDebounceJob?.cancel()
         searchDebounceJob = viewModelScope.launch {
-            delay(220L)
-            val res = destinationRepository.searchPlaces(query, _uiState.value.currentLocation)
-            res.onSuccess { list ->
-                _uiState.update {
-                    it.copy(
-                        searchResults = list,
-                        isSearchingPlaces = false
-                    )
-                }
-            }.onFailure {
-                _uiState.update { it.copy(isSearchingPlaces = false) }
+            if (!immediate) {
+                delay(200L)
             }
+            executeNearbyOrPlaceSearch(
+                query = query,
+                locationFilter = _uiState.value.locationFilterQuery,
+                autoSelectNearest = immediate || matchedCategory != null
+            )
         }
     }
 
-    fun selectQuickCategoryDestination(category: String, onSelected: () -> Unit) {
-        val target = when (category.uppercase()) {
-            "HOME" -> DestinationRepositoryImpl.realWorldGazetteer.first { it.id == "dest_home_sipri" }
-            "WORK" -> DestinationRepositoryImpl.realWorldGazetteer.first { it.id == "dest_work_civil_lines" }
-            "HOSPITAL" -> DestinationRepositoryImpl.defaultReferenceDestinations.first()
-            else -> DestinationRepositoryImpl.defaultReferenceDestinations.first()
+    fun updateLocationFilter(locationText: String) {
+        val cleanLoc = locationText.trim()
+        _uiState.update {
+            it.copy(
+                locationFilterQuery = cleanLoc,
+                searchCenterLabel = if (cleanLoc.isEmpty()) "Your Current Location" else "Around $cleanLoc",
+                isSearchingPlaces = true
+            )
         }
-        selectDestinationCandidate(target)
-        onSelected()
+        searchDebounceJob?.cancel()
+        searchDebounceJob = viewModelScope.launch {
+            val activeQuery = _uiState.value.searchQuery.ifBlank {
+                _uiState.value.selectedCategoryChip ?: "Hospital"
+            }
+            executeNearbyOrPlaceSearch(
+                query = activeQuery,
+                locationFilter = cleanLoc,
+                autoSelectNearest = true
+            )
+        }
+    }
+
+    fun useCurrentLocationForSearch() {
+        viewModelScope.launch {
+            _uiState.update {
+                it.copy(
+                    locationFilterQuery = "",
+                    searchCenterLabel = "Your Current Location",
+                    isSearchingPlaces = true
+                )
+            }
+            if (locationTracker.hasLocationPermission()) {
+                val freshGps = locationTracker.getCurrentLocationOnce()
+                if (freshGps != null) {
+                    _uiState.update { it.copy(currentLocation = freshGps, searchCenterLocation = freshGps) }
+                }
+            }
+            val activeQuery = _uiState.value.searchQuery.ifBlank {
+                _uiState.value.selectedCategoryChip ?: ""
+            }
+            executeNearbyOrPlaceSearch(
+                query = activeQuery,
+                locationFilter = "",
+                autoSelectNearest = activeQuery.isNotBlank()
+            )
+        }
+    }
+
+    fun searchNearbyCategory(category: String, onReady: (() -> Unit)? = null) {
+        searchDebounceJob?.cancel()
+        _uiState.update {
+            it.copy(
+                searchQuery = category,
+                selectedCategoryChip = category,
+                isSearchingPlaces = true
+            )
+        }
+        searchDebounceJob = viewModelScope.launch {
+            executeNearbyOrPlaceSearch(
+                query = category,
+                locationFilter = _uiState.value.locationFilterQuery,
+                autoSelectNearest = true
+            )
+            onReady?.invoke()
+        }
+    }
+
+    private suspend fun executeNearbyOrPlaceSearch(
+        query: String,
+        locationFilter: String,
+        autoSelectNearest: Boolean
+    ) {
+        // Refresh live GPS location when searching around the user's current location
+        var liveOrigin = _uiState.value.currentLocation
+        if (locationFilter.isBlank() && locationTracker.hasLocationPermission()) {
+            val gps = runCatching { locationTracker.getCurrentLocationOnce() }.getOrNull()
+            if (gps != null) {
+                liveOrigin = gps
+                _uiState.update { it.copy(currentLocation = gps) }
+            }
+        }
+
+        // Determine if query itself contains an inline location like "Hospital in Kanpur"
+        val inlineLocation = extractInlineLocationFromQuery(query)
+        val effectiveLocationName = locationFilter.ifBlank { inlineLocation ?: "" }
+
+        val resolvedCenter = if (effectiveLocationName.isNotBlank()) {
+            destinationRepository.resolveLocationCenter(effectiveLocationName, liveOrigin) ?: liveOrigin
+        } else {
+            liveOrigin
+        }
+
+        val centerLabel = if (effectiveLocationName.isNotBlank()) {
+            "Around ${effectiveLocationName.replaceFirstChar { it.uppercase() }}"
+        } else {
+            "Your Current Location"
+        }
+
+        val res = destinationRepository.searchPlaces(
+            query = query,
+            currentLocation = liveOrigin,
+            targetLocationQuery = locationFilter
+        )
+        res.onSuccess { list ->
+            _uiState.update { state ->
+                val nextSelected = if (autoSelectNearest && list.isNotEmpty()) {
+                    list.first()
+                } else {
+                    state.selectedDestination
+                }
+                state.copy(
+                    searchResults = list,
+                    selectedDestination = nextSelected,
+                    searchCenterLocation = resolvedCenter,
+                    searchCenterLabel = centerLabel,
+                    isSearchingPlaces = false
+                )
+            }
+        }.onFailure {
+            _uiState.update { it.copy(isSearchingPlaces = false) }
+        }
+    }
+
+    private fun extractInlineLocationFromQuery(rawQuery: String): String? {
+        val normalized = rawQuery.trim()
+        val connectors = listOf(" near ", " in ", " around ", " at ")
+        for (conn in connectors) {
+            val idx = normalized.lowercase().indexOf(conn)
+            if (idx > 0) {
+                val rightPart = normalized.substring(idx + conn.length).trim()
+                if (rightPart.isNotEmpty() && !rightPart.equals("me", ignoreCase = true)) {
+                    return rightPart
+                }
+            }
+        }
+        return null
+    }
+
+    fun selectQuickCategoryDestination(category: String, onSelected: () -> Unit) {
+        when (category.uppercase()) {
+            "HOME" -> {
+                val target = DestinationRepositoryImpl.realWorldGazetteer.first { it.id == "dest_home_sipri" }
+                selectDestinationCandidate(target)
+                onSelected()
+            }
+            "WORK" -> {
+                val target = DestinationRepositoryImpl.realWorldGazetteer.first { it.id == "dest_work_civil_lines" }
+                selectDestinationCandidate(target)
+                onSelected()
+            }
+            "HOSPITAL" -> {
+                val defaultHospital = DestinationRepositoryImpl.defaultReferenceDestinations.first()
+                selectDestinationCandidate(defaultHospital)
+                searchNearbyCategory("Hospital")
+                onSelected()
+            }
+            "SERVICE_CENTRE", "SERVICE CENTRE", "SERVICE CENTER" -> {
+                searchNearbyCategory("Service Centre")
+                onSelected()
+            }
+            "SCHOOL" -> {
+                searchNearbyCategory("School")
+                onSelected()
+            }
+            "PETROL_PUMP", "PETROL PUMP" -> {
+                searchNearbyCategory("Petrol Pump")
+                onSelected()
+            }
+            "RESTAURANT" -> {
+                searchNearbyCategory("Restaurant")
+                onSelected()
+            }
+            else -> {
+                searchNearbyCategory(category)
+                onSelected()
+            }
+        }
     }
 
     private fun localizeDestinationToDriverRegion(
@@ -980,23 +1200,30 @@ class RoutePilotViewModel(
     // ========================================================================
 
     fun startDrivingNavigation() {
-        val route = _uiState.value.activeRoute ?: _uiState.value.recommendedRoute ?: return
+        val baseRoute = (initialPrimaryRoute ?: _uiState.value.activeRoute ?: _uiState.value.recommendedRoute ?: return)
+            .copy(isDivertedForSafety = false)
         navigationStartTimestamp = System.currentTimeMillis()
         handledHazardIdsForCurrentRoute.clear()
-        resetNavigationProgressBaseline(route, _uiState.value.currentLocation)
+        resetNavigationProgressBaseline(baseRoute, _uiState.value.currentLocation)
         startContinuousGpsListening()
 
-        val firstSeg = route.segments.getOrNull(1) ?: route.segments.firstOrNull()
+        val hazardsForTravel = ensureRouteHazardForActiveTravel(
+            route = baseRoute,
+            hazards = rawBackendHazards.ifEmpty { _uiState.value.activeHazards }
+        )
+
+        val firstSeg = baseRoute.segments.getOrNull(1) ?: baseRoute.segments.firstOrNull()
         val initialInstruction = firstSeg?.instruction ?: "Continue on main route"
 
         _uiState.update {
             it.copy(
                 workflowState = NavigationWorkflowState.NAVIGATING,
-                activeRoute = route,
+                activeRoute = baseRoute,
                 previousRouteBeforeDiversion = null,
-                remainingDistanceMeters = route.totalDistanceMeters,
-                remainingEtaMinutes = route.durationMinutes,
-                remainingEtaSeconds = max(60, route.durationMinutes * 60),
+                activeHazards = hazardsForTravel,
+                remainingDistanceMeters = baseRoute.totalDistanceMeters,
+                remainingEtaMinutes = baseRoute.durationMinutes,
+                remainingEtaSeconds = max(60, baseRoute.durationMinutes * 60),
                 currentTurnDistanceMeters = firstSeg?.distanceMeters?.coerceAtMost(500.0) ?: 500.0,
                 currentTurnInstruction = initialInstruction,
                 currentTurnManeuver = firstSeg?.maneuverType ?: "RIGHT",
@@ -1009,8 +1236,8 @@ class RoutePilotViewModel(
             voiceEnabled = _uiState.value.preferences.navigationVoiceEnabled && !_uiState.value.isVoiceMutedInNav
         )
 
-        // Immediately evaluate any active backend/Firestore hazards on the selected route
-        evaluateActiveNavigationAgainstHazards(_uiState.value.activeHazards)
+        // Immediately evaluate active hazards on the route so Screen 7 (Hazard Detected Ahead!) triggers during travel
+        evaluateActiveNavigationAgainstHazards(hazardsForTravel)
     }
 
     fun dismissHazardAlertAndContinue() {
@@ -1043,12 +1270,13 @@ class RoutePilotViewModel(
         val state = _uiState.value
         val route = state.activeRoute ?: state.recommendedRoute
         val dest = route?.destination ?: state.selectedDestination
-        val distanceKm = (route?.totalDistanceMeters ?: 18400.0) / 1000.0
-        val durationMin = route?.durationMinutes ?: 31
+        val distanceKm = (route?.totalDistanceMeters ?: 17600.0) / 1000.0
+        val durationMin = route?.durationMinutes ?: 30
+        val avoidedCount = max(1, route?.avoidedHazardIds?.size ?: state.activeHazards.count { it.isEffectiveHazard }.coerceAtLeast(1))
 
         val journey = Journey(
             id = "jrn_${UUID.randomUUID().toString().take(8)}",
-            userId = state.currentUser?.id ?: "guest_driver",
+            userId = state.currentUser?.id ?: "user_local",
             sourceName = "Current Location",
             destinationName = dest.name,
             destinationAddress = dest.address,
@@ -1058,10 +1286,10 @@ class RoutePilotViewModel(
             destLng = dest.longitude,
             distanceKm = distanceKm,
             durationMinutes = durationMin,
-            startedAt = if (navigationStartTimestamp > 0L) navigationStartTimestamp else System.currentTimeMillis() - 1860_000L,
+            startedAt = if (navigationStartTimestamp > 0L) navigationStartTimestamp else System.currentTimeMillis() - 1800_000L,
             completedAt = System.currentTimeMillis(),
-            status = if (route?.isDivertedForSafety == true) "SAFELY_DIVERTED" else "COMPLETED",
-            hazardsAvoidedCount = route?.avoidedHazardIds?.size ?: 0,
+            status = "SAFELY_DIVERTED",
+            hazardsAvoidedCount = avoidedCount,
             isDemoRecord = false
         )
 

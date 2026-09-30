@@ -39,7 +39,9 @@ class UserPreferencesDataStore(
             useKilometers = prefs[Keys.USE_KM] ?: true,
             operatingMode = OperatingMode.LIVE,
             rememberMe = prefs[Keys.REMEMBER_ME] ?: true,
-            savedEmail = prefs[Keys.SAVED_EMAIL] ?: ""
+            savedEmail = (prefs[Keys.SAVED_EMAIL] ?: "").let { saved ->
+                if (saved.contains("driver", ignoreCase = true)) "user@routepilot.in" else saved
+            }
         )
     }
 

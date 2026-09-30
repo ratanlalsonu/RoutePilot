@@ -5,8 +5,7 @@
     <string name="splash_subtitle">IoT-Based Road &amp; Bridge Hazard Detection</string>
 
     <!-- Login & Auth -->
-    <string name="tab_driver_login">Driver Login</string>
-    <string name="tab_guest">Guest</string>
+    <string name="tab_driver_login">Login</string>
     <string name="label_email">Email</string>
     <string name="label_password">Password</string>
     <string name="label_remember_me">Remember me</string>
@@ -16,10 +15,8 @@
     <string name="action_continue_google">Continue with Google</string>
     <string name="prompt_no_account">Don\'t have an account?</string>
     <string name="action_sign_up">Sign Up</string>
-    <string name="action_continue_guest">Continue as Guest</string>
-    <string name="guest_mode_description">Access live navigation, real-time road and bridge hazard warnings, and safer route calculation without creating a permanent account.</string>
     <string name="error_invalid_credentials">Please enter a valid email and password (minimum 6 characters).</string>
-    <string name="error_auth_failed">Authentication failed. Please verify your credentials or continue as Guest.</string>
+    <string name="error_auth_failed">Authentication failed. Please verify your email and password.</string>
 
     <!-- Modes -->
     <string name="mode_live">LIVE MODE</string>
@@ -84,8 +81,8 @@
     <string name="action_dismiss">Dismiss</string>
 
     <!-- Recalculating Route Screen -->
-    <string name="title_recalculating_route">Switching to Other Path...</string>
-    <string name="subtitle_recalculating_route">Highlighting the safer alternate road path for you</string>
+    <string name="title_recalculating_route">Recalculating Route...</string>
+    <string name="subtitle_recalculating_route">Finding a safer and optimal path for you</string>
     <string name="action_cancel">Cancel</string>
     <string name="error_recalculation_failed">Unable to calculate a new route.</string>
     <string name="error_no_safe_route">No safe alternative route found.</string>
@@ -94,14 +91,16 @@
 
     <!-- Updated Route Screen -->
     <string name="banner_route_updated_title">Route Updated</string>
-    <string name="banner_route_updated_subtitle">New safer path highlighted on map.</string>
+    <string name="banner_route_updated_subtitle">A safer route has been selected.</string>
 
     <!-- Journey Completed Screen -->
-    <string name="title_journey_completed">Journey Completed!</string>
+    <string name="title_journey_completed">You Have Arrived!</string>
     <string name="subtitle_journey_completed">You have safely reached your destination.</string>
+    <string name="label_destination_format">Destination: %1$s</string>
     <string name="label_total_distance">Total Distance</string>
     <string name="label_total_time">Total Time</string>
-    <string name="action_done">Done</string>
+    <string name="label_hazards_avoided">Hazards Avoided</string>
+    <string name="action_done">Back to Home</string>
 
     <!-- History Screen -->
     <string name="title_journey_history">Journey History</string>
@@ -124,10 +123,10 @@
     <string name="lang_hindi">हिन्दी (Hindi)</string>
     <string name="units_km">Kilometers (km)</string>
     <string name="units_miles">Miles (mi)</string>
-    <string name="about_description">RoutePilot Driver APK — IoT-Based Road and Bridge Hazard Detection with Intelligent Route Diversion System. Receives real-time hazard updates from the central backend and automatically computes safer routes.</string>
+    <string name="about_description">RoutePilot — IoT-Based Road and Bridge Hazard Detection with Intelligent Route Diversion System. Receives real-time hazard updates from the central backend and automatically computes safer routes.</string>
 
     <!-- Profile Screen -->
-    <string name="title_profile">Driver Profile</string>
+    <string name="title_profile">Profile</string>
     <string name="action_logout">Sign Out</string>
 
     <!-- Errors & Offline -->

@@ -8,7 +8,6 @@ import androidx.activity.SystemBarStyle
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.core.view.WindowCompat
-import androidx.core.view.WindowInsetsCompat
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.example.ui.navigation.RoutePilotAppRoot
 import com.example.ui.theme.MyApplicationTheme
@@ -33,8 +32,6 @@ class MainActivity : ComponentActivity() {
         )
 
         WindowCompat.getInsetsController(window, window.decorView).apply {
-            show(WindowInsetsCompat.Type.statusBars())
-            show(WindowInsetsCompat.Type.navigationBars())
             isAppearanceLightStatusBars = true
             isAppearanceLightNavigationBars = true
         }
@@ -53,8 +50,6 @@ class MainActivity : ComponentActivity() {
         super.onResume()
         window.clearFlags(WindowManager.LayoutParams.FLAG_FULLSCREEN)
         WindowCompat.getInsetsController(window, window.decorView).apply {
-            show(WindowInsetsCompat.Type.statusBars())
-            show(WindowInsetsCompat.Type.navigationBars())
             isAppearanceLightStatusBars = true
             isAppearanceLightNavigationBars = true
         }

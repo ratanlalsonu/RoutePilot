@@ -118,22 +118,15 @@ fun RoutePilotAppRoot(
                                 }
                             }
                         },
-                        onContinueWithGoogle = {
-                            viewModel.continueWithGoogle {
+                        onContinueWithGoogle = { selectedEmail, selectedName ->
+                            viewModel.continueWithGoogle(selectedEmail, selectedName) {
                                 navController.navigate(RoutePilotRoutes.HOME) {
                                     popUpTo(RoutePilotRoutes.LOGIN) { inclusive = true }
                                 }
                             }
                         },
-                        onContinueAsGuest = {
-                            viewModel.continueAsGuest {
-                                navController.navigate(RoutePilotRoutes.HOME) {
-                                    popUpTo(RoutePilotRoutes.LOGIN) { inclusive = true }
-                                }
-                            }
-                        },
-                        onForgotPassword = { email ->
-                            viewModel.sendPasswordReset(email)
+                        onForgotPassword = { email, newPassword ->
+                            viewModel.sendPasswordReset(email, newPassword)
                         }
                     )
                 }
@@ -201,7 +194,15 @@ fun RoutePilotAppRoot(
                         isMapsApiKeyConfigured = uiState.isMapsApiKeyConfigured,
                         hasLocationPermission = uiState.hasLocationPermission,
                         useKilometers = uiState.preferences.useKilometers,
-                        onSearchQueryChange = viewModel::updateSearchQuery,
+                        locationFilterQuery = uiState.locationFilterQuery,
+                        searchCenterLocation = uiState.searchCenterLocation,
+                        searchCenterLabel = uiState.searchCenterLabel,
+                        selectedCategoryChip = uiState.selectedCategoryChip,
+                        onSearchQueryChange = { viewModel.updateSearchQuery(it, immediate = false) },
+                        onSearchSubmit = { viewModel.updateSearchQuery(it, immediate = true) },
+                        onSelectCategoryChip = { category -> viewModel.searchNearbyCategory(category) },
+                        onUpdateLocationFilter = viewModel::updateLocationFilter,
+                        onUseCurrentLocation = viewModel::useCurrentLocationForSearch,
                         onSelectPlaceSuggestion = viewModel::selectDestinationCandidate,
                         onMapClickLocation = viewModel::selectPointOnMap,
                         onConfirmDestination = {
@@ -268,8 +269,10 @@ fun RoutePilotAppRoot(
                         onTriggerRerouteNow = { viewModel.triggerAutomaticRerouting() },
                         onCancelRecalculation = viewModel::cancelRecalculation,
                         onEndNavigation = {
-                            viewModel.stopActiveNavigation()
-                            navController.popBackStack(RoutePilotRoutes.HOME, inclusive = false)
+                            viewModel.completeActiveJourney()
+                            navController.navigate(RoutePilotRoutes.JOURNEY_COMPLETED) {
+                                popUpTo(RoutePilotRoutes.HOME) { inclusive = false }
+                            }
                         }
                     )
                 }
@@ -279,6 +282,7 @@ fun RoutePilotAppRoot(
                         journey = uiState.lastCompletedJourney,
                         fallbackDestination = uiState.selectedDestination,
                         useKilometers = uiState.preferences.useKilometers,
+                        avoidedHazardName = uiState.activeHazards.firstOrNull()?.name ?: "Bridge B1",
                         onDone = {
                             viewModel.stopActiveNavigation()
                             navController.popBackStack(RoutePilotRoutes.HOME, inclusive = false)

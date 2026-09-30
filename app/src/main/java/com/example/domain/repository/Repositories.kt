@@ -35,8 +35,13 @@ interface DestinationRepository {
     suspend fun restoreDefaultRecentDestinations()
     suspend fun searchPlaces(
         query: String,
-        currentLocation: LocationPoint?
+        currentLocation: LocationPoint?,
+        targetLocationQuery: String = ""
     ): Result<List<Destination>>
+    suspend fun resolveLocationCenter(
+        locationQuery: String,
+        currentLocation: LocationPoint?
+    ): LocationPoint? = currentLocation
     suspend fun reverseGeocode(point: LocationPoint): Destination
 }
 
@@ -53,9 +58,12 @@ interface AuthRepository {
     val currentUser: Flow<User?>
     suspend fun loginWithEmail(email: String, password: String, rememberMe: Boolean): Result<User>
     suspend fun signUpWithEmail(name: String, email: String, password: String): Result<User>
-    suspend fun continueWithGoogle(idToken: String?): Result<User>
-    suspend fun continueAsGuest(): Result<User>
-    suspend fun sendPasswordReset(email: String): Result<Unit>
+    suspend fun continueWithGoogle(
+        email: String,
+        name: String = "",
+        idToken: String? = null
+    ): Result<User>
+    suspend fun sendPasswordReset(email: String, newPassword: String? = null): Result<String>
     suspend fun logout()
 }
 

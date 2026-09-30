@@ -5,8 +5,7 @@
     <string name="splash_subtitle">IoT-आधारित सड़क और पुल खतरा पहचान प्रणाली</string>
 
     <!-- Login & Auth -->
-    <string name="tab_driver_login">ड्राइवर लॉगिन</string>
-    <string name="tab_guest">अतिथि (Guest)</string>
+    <string name="tab_driver_login">लॉगिन</string>
     <string name="label_email">ईमेल</string>
     <string name="label_password">पासवर्ड</string>
     <string name="label_remember_me">मुझे याद रखें</string>
@@ -16,10 +15,8 @@
     <string name="action_continue_google">Google के साथ जारी रखें</string>
     <string name="prompt_no_account">क्या आपका खाता नहीं है?</string>
     <string name="action_sign_up">साइन अप करें</string>
-    <string name="action_continue_guest">अतिथि के रूप में जारी रखें</string>
-    <string name="guest_mode_description">बिना स्थायी खाता बनाए लाइव नेविगेशन, सड़क और पुल के खतरों की चेतावनी और सुरक्षित मार्ग की सुविधा प्राप्त करें।</string>
     <string name="error_invalid_credentials">कृपया मान्य ईमेल और पासवर्ड दर्ज करें (न्यूनतम 6 अक्षर)।</string>
-    <string name="error_auth_failed">प्रमाणीकरण विफल रहा। कृपया पुनः प्रयास करें या अतिथि मोड चुनें।</string>
+    <string name="error_auth_failed">प्रमाणीकरण विफल रहा। कृपया अपना ईमेल और पासवर्ड जांचें।</string>
 
     <!-- Modes -->
     <string name="mode_live">लाइव मोड</string>
@@ -97,11 +94,13 @@
     <string name="banner_route_updated_subtitle">एक सुरक्षित मार्ग चुना गया है।</string>
 
     <!-- Journey Completed Screen -->
-    <string name="title_journey_completed">यात्रा पूर्ण हुई!</string>
+    <string name="title_journey_completed">आप पहुँच गए हैं!</string>
     <string name="subtitle_journey_completed">आप सुरक्षित रूप से अपने गंतव्य पर पहुँच गए हैं।</string>
+    <string name="label_destination_format">गंतव्य: %1$s</string>
     <string name="label_total_distance">कुल दूरी</string>
     <string name="label_total_time">कुल समय</string>
-    <string name="action_done">पूर्ण (Done)</string>
+    <string name="label_hazards_avoided">बचाए गए खतरे (Hazards Avoided)</string>
+    <string name="action_done">होम पर वापस जाएं (Back to Home)</string>
 
     <!-- History Screen -->
     <string name="title_journey_history">यात्रा इतिहास</string>
@@ -124,10 +123,10 @@
     <string name="lang_hindi">हिन्दी (Hindi)</string>
     <string name="units_km">किलोमीटर (km)</string>
     <string name="units_miles">मील (mi)</string>
-    <string name="about_description">RoutePilot ड्राइवर ऐप — IoT-आधारित सड़क और पुल खतरा पहचान तथा बुद्धिमान मार्ग परिवर्तन प्रणाली।</string>
+    <string name="about_description">RoutePilot ऐप — IoT-आधारित सड़क और पुल खतरा पहचान तथा बुद्धिमान मार्ग परिवर्तन प्रणाली।</string>
 
     <!-- Profile Screen -->
-    <string name="title_profile">ड्राइवर प्रोफ़ाइल</string>
+    <string name="title_profile">प्रोफ़ाइल</string>
     <string name="action_logout">लॉग आउट करें</string>
 
     <!-- Errors & Offline -->

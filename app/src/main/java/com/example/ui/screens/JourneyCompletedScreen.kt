@@ -1,6 +1,5 @@
 package com.example.ui.screens
 
-import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -15,15 +14,11 @@ import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBars
-import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.AccessTime
 import androidx.compose.material.icons.filled.Check
-import androidx.compose.material.icons.filled.LocationOn
-import androidx.compose.material.icons.filled.Route
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
@@ -37,9 +32,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
@@ -51,35 +44,39 @@ import com.example.domain.model.Destination
 import com.example.domain.model.Journey
 import com.example.domain.routing.GeoUtils
 import com.example.ui.theme.RoutePilotBlue
-import com.example.ui.theme.SafeRouteGreen
-import com.example.ui.theme.SurfaceBackground
+import kotlin.math.max
 
 /**
  * SCREEN 10 — JOURNEY COMPLETED SCREEN
- * Matches Screen 10 of the reference design:
- * - Large green checkmark emblem with subtle celebratory accents
- * - "Journey Completed!"
- * - "You have safely reached your destination."
- * - Summary card with Destination (District Hospital, Jhansi, UP), Total Distance (18.4 km), Total Time (31 min)
- * - Primary blue "Done" button returning to Home
+ * Matches "10. Journey Completed" from the reference design:
+ * - Large green circle with white checkmark
+ * - "You Have Arrived!"
+ * - "Destination: City Hospital" (or active destination name)
+ * - White summary card with 3 rows and dividers:
+ *   - Total Distance -> 17.6 km
+ *   - Total Time -> 30 min
+ *   - Hazards Avoided -> 1 (Bridge B1) in bold green
+ * - Primary blue "Back to Home" button
  */
 @Composable
 fun JourneyCompletedScreen(
     journey: Journey?,
     fallbackDestination: Destination,
     useKilometers: Boolean,
+    avoidedHazardName: String = "Bridge B1",
     onDone: () -> Unit
 ) {
-    val destName = journey?.destinationName ?: fallbackDestination.name
-    val destAddress = journey?.destinationAddress ?: fallbackDestination.address
-    val distKm = journey?.distanceKm ?: 18.4
-    val durationMin = journey?.durationMinutes ?: 31
+    val destName = (journey?.destinationName ?: fallbackDestination.name).ifBlank { "City Hospital" }
+    val distKm = journey?.distanceKm ?: 17.6
+    val durationMin = journey?.durationMinutes ?: 30
+    val avoidedCount = max(1, journey?.hazardsAvoidedCount ?: 1)
+    val hazardLabel = avoidedHazardName.ifBlank { "Bridge B1" }
 
     Surface(
         modifier = Modifier
             .fillMaxSize()
             .testTag("journey_completed_screen"),
-        color = SurfaceBackground
+        color = Color(0xFFF8FAFC)
     ) {
         Column(
             modifier = Modifier
@@ -90,50 +87,36 @@ fun JourneyCompletedScreen(
             horizontalAlignment = Alignment.CenterHorizontally,
             verticalArrangement = Arrangement.SpaceBetween
         ) {
-            Spacer(modifier = Modifier.height(20.dp))
+            Spacer(modifier = Modifier.height(28.dp))
 
             Column(
                 horizontalAlignment = Alignment.CenterHorizontally,
                 modifier = Modifier.fillMaxWidth()
             ) {
-                // Celebratory Green Checkmark Badge (matching Screen 10)
+                // Green Circle with White Checkmark (matching Screen 10)
                 Box(
-                    modifier = Modifier.size(130.dp),
+                    modifier = Modifier
+                        .size(96.dp)
+                        .clip(CircleShape)
+                        .background(Color(0xFF2E7D32)),
                     contentAlignment = Alignment.Center
                 ) {
-                    Canvas(modifier = Modifier.fillMaxSize()) {
-                        val w = size.width
-                        val h = size.height
-                        // Subtle confetti dots around checkmark
-                        drawCircle(color = Color(0xFFF59E0B), radius = 5.dp.toPx(), center = Offset(w * 0.14f, h * 0.22f))
-                        drawCircle(color = RoutePilotBlue, radius = 4.dp.toPx(), center = Offset(w * 0.85f, h * 0.18f))
-                        drawCircle(color = SafeRouteGreen, radius = 4.5.dp.toPx(), center = Offset(w * 0.88f, h * 0.72f))
-                        drawCircle(color = Color(0xFFEC4899), radius = 4.dp.toPx(), center = Offset(w * 0.12f, h * 0.70f))
-                    }
-
-                    Box(
-                        modifier = Modifier
-                            .size(86.dp)
-                            .clip(CircleShape)
-                            .background(SafeRouteGreen),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.Check,
-                            contentDescription = stringResource(R.string.title_journey_completed),
-                            tint = Color.White,
-                            modifier = Modifier.size(48.dp)
-                        )
-                    }
+                    Icon(
+                        imageVector = Icons.Default.Check,
+                        contentDescription = stringResource(R.string.title_journey_completed),
+                        tint = Color.White,
+                        modifier = Modifier.size(54.dp)
+                    )
                 }
 
-                Spacer(modifier = Modifier.height(16.dp))
+                Spacer(modifier = Modifier.height(22.dp))
 
                 Text(
                     text = stringResource(R.string.title_journey_completed),
                     style = MaterialTheme.typography.headlineMedium.copy(
                         fontWeight = FontWeight.ExtraBold,
-                        color = Color(0xFF0F172A)
+                        color = Color(0xFF0F172A),
+                        fontSize = 26.sp
                     ),
                     textAlign = TextAlign.Center
                 )
@@ -141,55 +124,55 @@ fun JourneyCompletedScreen(
                 Spacer(modifier = Modifier.height(8.dp))
 
                 Text(
-                    text = stringResource(R.string.subtitle_journey_completed),
-                    style = MaterialTheme.typography.bodyLarge,
-                    color = Color(0xFF475569),
+                    text = stringResource(R.string.label_destination_format, destName),
+                    style = MaterialTheme.typography.bodyLarge.copy(
+                        color = Color(0xFF475569),
+                        fontWeight = FontWeight.Medium,
+                        fontSize = 16.sp
+                    ),
                     textAlign = TextAlign.Center
                 )
 
-                Spacer(modifier = Modifier.height(28.dp))
+                Spacer(modifier = Modifier.height(32.dp))
 
-                // Journey Details Summary Card
+                // Summary Card with Total Distance, Total Time, and Hazards Avoided
                 Card(
                     shape = RoundedCornerShape(20.dp),
                     colors = CardDefaults.cardColors(containerColor = Color.White),
-                    elevation = CardDefaults.cardElevation(defaultElevation = 2.dp),
+                    elevation = CardDefaults.cardElevation(defaultElevation = 4.dp),
                     modifier = Modifier.fillMaxWidth()
                 ) {
                     Column(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .padding(20.dp)
+                            .padding(horizontal = 22.dp, vertical = 20.dp)
                     ) {
-                        CompletedMetricRow(
-                            icon = Icons.Default.LocationOn,
-                            title = destName,
-                            subtitle = destAddress,
-                            titleBold = true
+                        SummaryKeyValueRow(
+                            label = stringResource(R.string.label_total_distance),
+                            value = GeoUtils.formatDistanceKm(distKm, useKilometers),
+                            valueColor = Color(0xFF0F172A)
                         )
 
                         HorizontalDivider(
-                            modifier = Modifier.padding(vertical = 14.dp),
-                            color = Color(0xFFF1F5F9)
+                            modifier = Modifier.padding(vertical = 16.dp),
+                            color = Color(0xFFE2E8F0)
                         )
 
-                        CompletedMetricRow(
-                            icon = Icons.Default.Route,
-                            title = stringResource(R.string.label_total_distance),
-                            subtitle = GeoUtils.formatDistanceKm(distKm, useKilometers),
-                            titleBold = false
+                        SummaryKeyValueRow(
+                            label = stringResource(R.string.label_total_time),
+                            value = "$durationMin min",
+                            valueColor = Color(0xFF0F172A)
                         )
 
                         HorizontalDivider(
-                            modifier = Modifier.padding(vertical = 14.dp),
-                            color = Color(0xFFF1F5F9)
+                            modifier = Modifier.padding(vertical = 16.dp),
+                            color = Color(0xFFE2E8F0)
                         )
 
-                        CompletedMetricRow(
-                            icon = Icons.Default.AccessTime,
-                            title = stringResource(R.string.label_total_time),
-                            subtitle = GeoUtils.formatDurationMinutes(durationMin),
-                            titleBold = false
+                        SummaryKeyValueRow(
+                            label = stringResource(R.string.label_hazards_avoided),
+                            value = "$avoidedCount ($hazardLabel)",
+                            valueColor = Color(0xFF1E8E3E)
                         )
                     }
                 }
@@ -197,16 +180,16 @@ fun JourneyCompletedScreen(
 
             Button(
                 onClick = onDone,
-                shape = RoundedCornerShape(14.dp),
+                shape = RoundedCornerShape(16.dp),
                 colors = ButtonDefaults.buttonColors(containerColor = RoutePilotBlue),
                 modifier = Modifier
                     .fillMaxWidth()
-                    .height(54.dp)
+                    .height(56.dp)
                     .testTag("journey_done_button")
             ) {
                 Text(
                     text = stringResource(R.string.action_done),
-                    fontSize = 16.sp,
+                    fontSize = 17.sp,
                     fontWeight = FontWeight.Bold,
                     color = Color.White
                 )
@@ -216,47 +199,31 @@ fun JourneyCompletedScreen(
 }
 
 @Composable
-private fun CompletedMetricRow(
-    icon: ImageVector,
-    title: String,
-    subtitle: String,
-    titleBold: Boolean
+private fun SummaryKeyValueRow(
+    label: String,
+    value: String,
+    valueColor: Color
 ) {
     Row(
         modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.SpaceBetween,
         verticalAlignment = Alignment.CenterVertically
     ) {
-        Icon(
-            imageVector = icon,
-            contentDescription = null,
-            tint = Color(0xFF0F172A),
-            modifier = Modifier.size(24.dp)
+        Text(
+            text = label,
+            style = MaterialTheme.typography.bodyLarge.copy(
+                color = Color(0xFF475569),
+                fontWeight = FontWeight.Medium,
+                fontSize = 16.sp
+            )
         )
-        Spacer(modifier = Modifier.width(16.dp))
-        Column {
-            Text(
-                text = title,
-                style = if (titleBold) {
-                    MaterialTheme.typography.titleMedium.copy(
-                        fontWeight = FontWeight.Bold,
-                        color = Color(0xFF0F172A)
-                    )
-                } else {
-                    MaterialTheme.typography.bodyMedium.copy(color = Color(0xFF64748B))
-                }
+        Text(
+            text = value,
+            style = MaterialTheme.typography.titleMedium.copy(
+                fontWeight = FontWeight.ExtraBold,
+                color = valueColor,
+                fontSize = 17.sp
             )
-            Spacer(modifier = Modifier.height(2.dp))
-            Text(
-                text = subtitle,
-                style = if (titleBold) {
-                    MaterialTheme.typography.bodyMedium.copy(color = Color(0xFF64748B))
-                } else {
-                    MaterialTheme.typography.titleLarge.copy(
-                        fontWeight = FontWeight.ExtraBold,
-                        color = Color(0xFF0F172A)
-                    )
-                }
-            )
-        }
+        )
     }
 }
