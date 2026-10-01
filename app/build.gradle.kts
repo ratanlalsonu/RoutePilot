@@ -20,6 +20,9 @@ android {
     versionName = "1.0"
 
     manifestPlaceholders["MAPS_API_KEY"] = "YOUR_GOOGLE_MAPS_API_KEY"
+    if (!file("google-services.json").exists()) {
+      resValue("string", "default_web_client_id", "246133316631-qf0cnl6vn1essjqei93uvebkgn82n4f5.apps.googleusercontent.com")
+    }
     testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
   }
 

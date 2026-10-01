@@ -48,6 +48,52 @@ jobs:
           echo "MAPS_API_KEY=${MAPS_KEY:-YOUR_GOOGLE_MAPS_API_KEY}" > .env
           echo "PLACES_API_KEY=${PLACES_KEY:-YOUR_GOOGLE_PLACES_API_KEY}" >> .env
 
+      - name: Ensure google-services.json exists for CI build
+        run: |
+          if [ ! -f app/google-services.json ]; then
+            cat << 'EOF' > app/google-services.json
+          {
+            "project_info": {
+              "project_number": "246133316631",
+              "project_id": "gen-lang-client-0396467346",
+              "storage_bucket": "gen-lang-client-0396467346.firebasestorage.app"
+            },
+            "client": [
+              {
+                "client_info": {
+                  "mobilesdk_app_id": "1:246133316631:android:bbdc804ac05dc974141052",
+                  "android_client_info": {
+                    "package_name": "com.aistudio.routepilot.drvnav"
+                  }
+                },
+                "oauth_client": [
+                  {
+                    "client_id": "246133316631-qf0cnl6vn1essjqei93uvebkgn82n4f5.apps.googleusercontent.com",
+                    "client_type": 3
+                  }
+                ],
+                "api_key": [
+                  {
+                    "current_key": "AIzaSyCTEGO4DpThrOSrisuEQkHDrdf805jmtFw"
+                  }
+                ],
+                "services": {
+                  "appinvite_service": {
+                    "other_platform_oauth_client": [
+                      {
+                        "client_id": "246133316631-qf0cnl6vn1essjqei93uvebkgn82n4f5.apps.googleusercontent.com",
+                        "client_type": 3
+                      }
+                    ]
+                  }
+                }
+              }
+            ],
+            "configuration_version": "1"
+          }
+          EOF
+          fi
+
       - name: Build Debug APK
         run: gradle assembleDebug -x lint
 
