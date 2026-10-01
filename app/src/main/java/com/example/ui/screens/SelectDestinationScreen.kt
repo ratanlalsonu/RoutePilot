@@ -152,6 +152,7 @@ fun SelectDestinationScreen(
     onUseCurrentLocation: (() -> Unit)? = null,
     onSelectPlaceSuggestion: (Destination) -> Unit,
     onMapClickLocation: (Double, Double) -> Unit,
+    onMapViewportChanged: ((Double, Double, Double, Double, Double, Double) -> Unit)? = null,
     onConfirmDestination: () -> Unit,
     onBack: () -> Unit
 ) {
@@ -495,13 +496,15 @@ fun SelectDestinationScreen(
             }
 
             // Map + Autocomplete Suggestions Overlay + Bottom Selected Place Sheet
+            val isCategorySearchActive = isMultiMarkerCategoryView || selectedCategoryChip != null
+            val distinctSearchResults = remember(searchResults) { searchResults.distinctBy { it.id } }
             Box(modifier = Modifier.weight(1f)) {
                 RoutePilotMapView(
                     currentLocation = currentLocation,
                     destination = selectedDestination,
                     primaryRoute = null,
                     hazards = activeHazards,
-                    nearbyPlaces = searchResults,
+                    nearbyPlaces = if (isCategorySearchActive) distinctSearchResults else emptyList(),
                     searchCenterLocation = searchCenterLocation,
                     isMultiMarkerCategoryView = isMultiMarkerCategoryView,
                     fitAllMarkersTrigger = fitAllMarkersTrigger,
@@ -515,6 +518,7 @@ fun SelectDestinationScreen(
                         showDropdown = false
                         onSelectPlaceSuggestion(tappedPlace)
                     },
+                    onMapViewportChanged = onMapViewportChanged,
                     onMapClick = { lat, lng ->
                         focusManager.clearFocus()
                         keyboardController?.hide()
@@ -524,8 +528,8 @@ fun SelectDestinationScreen(
                     modifier = Modifier.fillMaxSize()
                 )
 
-                // Floating Google Maps-style Red Markers Count & "Show All on Map" Pill
-                if (!showDropdown && searchResults.size > 1) {
+                // Floating Google Maps-style Red Markers Count & "Show All on Map" Pill (only for Category searches)
+                if (!showDropdown && isCategorySearchActive && searchResults.size > 1) {
                     Surface(
                         shape = RoundedCornerShape(50),
                         color = Color.White,
@@ -586,57 +590,59 @@ fun SelectDestinationScreen(
                             .align(Alignment.TopCenter)
                     ) {
                         Column {
-                            Row(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .background(Color(0xFFFEF2F2))
-                                    .clickable {
-                                        focusManager.clearFocus()
-                                        keyboardController?.hide()
-                                        showDropdown = false
-                                        if (onSearchSubmit != null && searchQuery.isNotBlank()) {
-                                            onSearchSubmit(searchQuery)
-                                        } else {
-                                            onShowAllMarkersOnMap?.invoke()
-                                        }
-                                    }
-                                    .padding(horizontal = 14.dp, vertical = 9.dp)
-                                    .testTag("dropdown_show_all_red_markers_row"),
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.SpaceBetween
-                            ) {
+                            if (isCategorySearchActive && searchResults.size > 1) {
                                 Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .background(Color(0xFFFEF2F2))
+                                        .clickable {
+                                            focusManager.clearFocus()
+                                            keyboardController?.hide()
+                                            showDropdown = false
+                                            if (onSearchSubmit != null && searchQuery.isNotBlank()) {
+                                                onSearchSubmit(searchQuery)
+                                            } else {
+                                                onShowAllMarkersOnMap?.invoke()
+                                            }
+                                        }
+                                        .padding(horizontal = 14.dp, vertical = 9.dp)
+                                        .testTag("dropdown_show_all_red_markers_row"),
                                     verticalAlignment = Alignment.CenterVertically,
-                                    modifier = Modifier.weight(1f)
+                                    horizontalArrangement = Arrangement.SpaceBetween
                                 ) {
-                                    Icon(
-                                        imageVector = Icons.Default.LocationOn,
-                                        contentDescription = null,
-                                        tint = HazardRed,
-                                        modifier = Modifier.size(18.dp)
-                                    )
-                                    Spacer(modifier = Modifier.width(6.dp))
+                                    Row(
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        modifier = Modifier.weight(1f)
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.Default.LocationOn,
+                                            contentDescription = null,
+                                            tint = HazardRed,
+                                            modifier = Modifier.size(18.dp)
+                                        )
+                                        Spacer(modifier = Modifier.width(6.dp))
+                                        Text(
+                                            text = "Mark all ${searchResults.size} in Red on Map • $searchCenterLabel",
+                                            style = MaterialTheme.typography.labelMedium.copy(
+                                                fontWeight = FontWeight.ExtraBold,
+                                                color = HazardRed
+                                            ),
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis
+                                        )
+                                    }
                                     Text(
-                                        text = "Mark all ${searchResults.size} in Red on Map • $searchCenterLabel",
+                                        text = "Show Map",
                                         style = MaterialTheme.typography.labelMedium.copy(
                                             fontWeight = FontWeight.ExtraBold,
-                                            color = HazardRed
-                                        ),
-                                        maxLines = 1,
-                                        overflow = TextOverflow.Ellipsis
+                                            color = RoutePilotBlue
+                                        )
                                     )
                                 }
-                                Text(
-                                    text = "Show Map",
-                                    style = MaterialTheme.typography.labelMedium.copy(
-                                        fontWeight = FontWeight.ExtraBold,
-                                        color = RoutePilotBlue
-                                    )
-                                )
+                                HorizontalDivider(color = Color(0xFFE2E8F0))
                             }
-                            HorizontalDivider(color = Color(0xFFE2E8F0))
                             LazyColumn {
-                                items(searchResults, key = { it.id }) { suggestion ->
+                                items(distinctSearchResults, key = { it.id }) { suggestion ->
                                     val isCurrentlySelected = suggestion.id == selectedDestination.id
                                     Row(
                                         modifier = Modifier
@@ -712,8 +718,8 @@ fun SelectDestinationScreen(
                             .windowInsetsPadding(WindowInsets.navigationBars)
                             .padding(horizontal = 18.dp, vertical = 14.dp)
                     ) {
-                        // Quick horizontal strip of nearby places
-                        if (searchResults.size > 1) {
+                        // Quick horizontal strip of nearby category places (only for Category searches)
+                        if (isCategorySearchActive && searchResults.size > 1) {
                             LazyRow(
                                 horizontalArrangement = Arrangement.spacedBy(8.dp),
                                 contentPadding = PaddingValues(bottom = 10.dp),
@@ -721,7 +727,7 @@ fun SelectDestinationScreen(
                                     .fillMaxWidth()
                                     .testTag("nearby_markers_quick_strip")
                             ) {
-                                items(searchResults, key = { "strip_${it.id}" }) { placeItem ->
+                                items(distinctSearchResults, key = { "strip_${it.id}" }) { placeItem ->
                                     val isActive = placeItem.id == selectedDestination.id
                                     Surface(
                                         shape = RoundedCornerShape(10.dp),

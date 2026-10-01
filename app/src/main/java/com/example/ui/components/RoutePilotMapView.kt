@@ -133,6 +133,7 @@ fun RoutePilotMapView(
     onToggleVoiceMute: (() -> Unit)? = null,
     onSelectAlternateRoute: (() -> Unit)? = null,
     onSelectNearbyPlace: ((Destination) -> Unit)? = null,
+    onMapViewportChanged: ((Double, Double, Double, Double, Double, Double) -> Unit)? = null,
     onMapClick: ((Double, Double) -> Unit)? = null,
     modifier: Modifier = Modifier
 ) {
@@ -309,16 +310,15 @@ fun RoutePilotMapView(
     }
 
     // Unified Camera Controller:
-    // 1. Multi-Marker Category / Location Search -> frames ALL Red Location Markers in LatLngBounds
-    // 2. Initial SelectDestinationScreen Open -> centers on User's Current Location
-    // 3. Tapped Single Marker -> centers on that selected marker while keeping all red markers visible
+    // 1. Multi-Marker Category Search -> frames Red Category Markers in LatLngBounds
+    // 2. Single Location Search (e.g. "Banda", "Atarra") -> moves directly to that single location
+    // 3. Initial SelectDestinationScreen Open -> centers on User's Current Location
     // 4. Route Preview / Active Navigation -> frames route or tracks 3D navigation camera
     LaunchedEffect(
-        nearbyIdsSignature,
+        fitAllMarkersTrigger,
         searchCenterLocation?.latitude,
         searchCenterLocation?.longitude,
         isMultiMarkerCategoryView,
-        fitAllMarkersTrigger,
         destination?.id,
         destination?.latitude,
         destination?.longitude,
@@ -326,37 +326,35 @@ fun RoutePilotMapView(
         isNavigationMode
     ) {
         if (!isNavigationMode && primaryRoute == null) {
-            val shouldFrameAllRedMarkers = nearbyPlaces.isNotEmpty() && (
-                isMultiMarkerCategoryView ||
-                    (nearbyPlaces.size > 1 && destination?.id == nearbyPlaces.firstOrNull()?.id)
-                )
+            val shouldFrameAllRedMarkers = isMultiMarkerCategoryView && nearbyPlaces.isNotEmpty()
             if (shouldFrameAllRedMarkers) {
-                val anchor = searchCenterLocation
-                    ?: LocationPoint(nearbyPlaces.first().latitude, nearbyPlaces.first().longitude)
-                val clusterPlaces = nearbyPlaces.filter { place ->
+                val anchor = searchCenterLocation ?: currentLocation
+                val localCluster = nearbyPlaces.filter { place ->
                     GeoUtils.haversineMeters(
                         anchor.latitude,
                         anchor.longitude,
                         place.latitude,
                         place.longitude
-                    ) <= 35_000.0
-                }.ifEmpty { nearbyPlaces }
+                    ) <= 55_000.0
+                }
+                val regionalCluster = nearbyPlaces.filter { place ->
+                    GeoUtils.haversineMeters(
+                        anchor.latitude,
+                        anchor.longitude,
+                        place.latitude,
+                        place.longitude
+                    ) <= 280_000.0
+                }
+                val clusterPlaces = when {
+                    localCluster.size >= 2 -> localCluster
+                    regionalCluster.size >= 2 -> regionalCluster
+                    else -> nearbyPlaces
+                }
 
                 val boundsBuilder = LatLngBounds.builder()
                 var includedCount = 0
                 clusterPlaces.forEach { place ->
                     boundsBuilder.include(LatLng(place.latitude, place.longitude))
-                    includedCount++
-                }
-                // Only include currentLocation if searching around current location (within 12 km)
-                val distDriverToAnchor = GeoUtils.haversineMeters(
-                    currentLocation.latitude,
-                    currentLocation.longitude,
-                    anchor.latitude,
-                    anchor.longitude
-                )
-                if (searchCenterLocation == null && distDriverToAnchor <= 12_000.0) {
-                    boundsBuilder.include(LatLng(currentLocation.latitude, currentLocation.longitude))
                     includedCount++
                 }
 
@@ -378,7 +376,7 @@ fun RoutePilotMapView(
                     val first = clusterPlaces.first()
                     val camPos = CameraPosition.Builder()
                         .target(LatLng(first.latitude, first.longitude))
-                        .zoom(14.5f)
+                        .zoom(14.2f)
                         .bearing(0f)
                         .tilt(0f)
                         .build()
@@ -390,10 +388,11 @@ fun RoutePilotMapView(
                 val isCurrentUserLoc = destination == null || destination.id == "current_user_location"
                 val targetLat = if (isCurrentUserLoc) displayDriverLocation.latitude else destination!!.latitude
                 val targetLng = if (isCurrentUserLoc) displayDriverLocation.longitude else destination!!.longitude
-                val targetZoom = if (isCurrentUserLoc) {
-                    15.8f
-                } else {
-                    max(cameraPositionState.position.zoom, 15.2f).coerceAtMost(16.8f)
+                val targetZoom = when {
+                    isCurrentUserLoc -> 15.8f
+                    destination?.category.equals("Location", ignoreCase = true) ||
+                        destination?.category.equals("City / Locality", ignoreCase = true) -> 13.5f
+                    else -> 15.4f
                 }
                 val camPos = CameraPosition.Builder()
                     .target(LatLng(targetLat, targetLng))
@@ -487,6 +486,28 @@ fun RoutePilotMapView(
             runCatching {
                 cameraPositionState.animate(CameraUpdateFactory.zoomTo(zoomLevel))
             }
+        }
+    }
+
+    // Dynamically load real category markers whenever the user pans or zooms the Google World Map
+    LaunchedEffect(cameraPositionState.isMoving, isMultiMarkerCategoryView) {
+        if (!cameraPositionState.isMoving &&
+            !isNavigationMode &&
+            primaryRoute == null &&
+            isMultiMarkerCategoryView &&
+            onMapViewportChanged != null
+        ) {
+            val target = cameraPositionState.position.target
+            val zoom = cameraPositionState.position.zoom.toDouble()
+            val visibleBounds = runCatching {
+                cameraPositionState.projection?.visibleRegion?.latLngBounds
+            }.getOrNull()
+            val approxDelta = (180.0 / Math.pow(2.0, zoom)).coerceIn(0.04, 18.0)
+            val minLat = visibleBounds?.southwest?.latitude ?: (target.latitude - approxDelta)
+            val minLng = visibleBounds?.southwest?.longitude ?: (target.longitude - approxDelta)
+            val maxLat = visibleBounds?.northeast?.latitude ?: (target.latitude + approxDelta)
+            val maxLng = visibleBounds?.northeast?.longitude ?: (target.longitude + approxDelta)
+            onMapViewportChanged(target.latitude, target.longitude, minLat, minLng, maxLat, maxLng)
         }
     }
 
@@ -759,9 +780,10 @@ fun RoutePilotMapView(
                         )
                     }
 
-                    val (redPinBitmap, pinAnchor) = remember(place.id, place.name, isSelectedPlace) {
+                    val (redPinBitmap, pinAnchor) = remember(place.id, place.name, place.category, isSelectedPlace) {
                         createGoogleMapsRedPlacePinBitmap(
                             title = place.name,
+                            category = place.category,
                             isSelected = isSelectedPlace
                         )
                     }
@@ -784,7 +806,7 @@ fun RoutePilotMapView(
                 }
             }
 
-            // 5. Primary Destination Red Pin (if not already rendered in nearbyPlaces or during Route Preview / Navigation)
+            // 5. Primary Destination Red Pin (for Single Location Search or Route Preview / Navigation)
             val isDestinationInNearbyList = !isNavigationMode &&
                 primaryRoute == null &&
                 destination != null &&
@@ -803,19 +825,44 @@ fun RoutePilotMapView(
                         strokeColor = HazardRed,
                         strokeWidth = 4f
                     )
-                }
-                Marker(
-                    state = destinationMarkerState,
-                    title = destination.name,
-                    snippet = "${destination.category} • ${destination.address}",
-                    zIndex = 9.2f,
-                    icon = BitmapDescriptorFactory.defaultMarker(BitmapDescriptorFactory.HUE_RED),
-                    onClick = { marker ->
-                        onSelectNearbyPlace?.invoke(destination)
-                        marker.showInfoWindow()
-                        true
+                    val (singleDestBitmap, singleDestAnchor) = remember(
+                        destination.id,
+                        destination.name,
+                        destination.category
+                    ) {
+                        createGoogleMapsRedPlacePinBitmap(
+                            title = destination.name,
+                            category = destination.category,
+                            isSelected = true
+                        )
                     }
-                )
+                    Marker(
+                        state = destinationMarkerState,
+                        title = destination.name,
+                        snippet = "${destination.category} • ${destination.address}",
+                        anchor = singleDestAnchor,
+                        zIndex = 9.2f,
+                        icon = BitmapDescriptorFactory.fromBitmap(singleDestBitmap),
+                        onClick = { marker ->
+                            onSelectNearbyPlace?.invoke(destination)
+                            marker.showInfoWindow()
+                            true
+                        }
+                    )
+                } else {
+                    Marker(
+                        state = destinationMarkerState,
+                        title = destination.name,
+                        snippet = "${destination.category} • ${destination.address}",
+                        zIndex = 9.2f,
+                        icon = BitmapDescriptorFactory.defaultMarker(BitmapDescriptorFactory.HUE_RED),
+                        onClick = { marker ->
+                            onSelectNearbyPlace?.invoke(destination)
+                            marker.showInfoWindow()
+                            true
+                        }
+                    )
+                }
             }
 
             // 4. Professional RoutePilot 3D Navigation Arrow Puck (rotates & moves with mobile sensor + GPS)
@@ -1578,15 +1625,18 @@ private fun createHazardTriangleBitmap(colorArgb: Int): Bitmap {
 }
 
 /**
- * Creates a Google Maps-style Red Teardrop Location Pin (`#EA4335`) with a crisp white-haloed
- * place name label beside it so all matching category locations stand out in red on the map.
+ * Creates a Google Maps-style Red Teardrop Location Pin (`#EA4335`) with:
+ * 1. The specific Category Icon drawn inside the circular head of the red pin (e.g., Hospital Cross/H,
+ *    Fuel Pump, School Cap, Service Wrench, Restaurant Fork/Knife, Bank, Police Shield, Bus, Train, etc.)
+ * 2. A crisp white-haloed place name label beside the pin.
  */
 private fun createGoogleMapsRedPlacePinBitmap(
     title: String,
+    category: String,
     isSelected: Boolean
 ): Pair<Bitmap, Offset> {
     val cleanTitle = title.trim().let {
-        if (it.length > 22) it.take(20).trimEnd() + "…" else it
+        if (it.length > 24) it.take(22).trimEnd() + "…" else it
     }
 
     val textSizePx = if (isSelected) 25f else 22f
@@ -1605,8 +1655,8 @@ private fun createGoogleMapsRedPlacePinBitmap(
         strokeCap = Paint.Cap.ROUND
     }
 
-    val pinRadius = if (isSelected) 21f else 17f
-    val pinHeight = if (isSelected) 54f else 44f
+    val pinRadius = if (isSelected) 23f else 19.5f
+    val pinHeight = if (isSelected) 58f else 49f
     val leftPad = 8f
     val topPad = 6f
     val pinCenterX = leftPad + pinRadius
@@ -1615,8 +1665,8 @@ private fun createGoogleMapsRedPlacePinBitmap(
 
     val labelStartX = pinCenterX + pinRadius + 8f
     val measuredTextW = textFillPaint.measureText(cleanTitle)
-    val totalW = (labelStartX + measuredTextW + 14f).toInt().coerceAtLeast(80)
-    val totalH = (pinTipY + 8f).toInt().coerceAtLeast(60)
+    val totalW = (labelStartX + measuredTextW + 14f).toInt().coerceAtLeast(88)
+    val totalH = (pinTipY + 8f).toInt().coerceAtLeast(64)
 
     val bmp = Bitmap.createBitmap(totalW, totalH, Bitmap.Config.ARGB_8888)
     val canvas = android.graphics.Canvas(bmp)
@@ -1627,7 +1677,7 @@ private fun createGoogleMapsRedPlacePinBitmap(
         style = Paint.Style.FILL
     }
     canvas.drawOval(
-        RectF(pinCenterX - 8f, pinTipY - 3f, pinCenterX + 8f, pinTipY + 4f),
+        RectF(pinCenterX - 9f, pinTipY - 3f, pinCenterX + 9f, pinTipY + 4f),
         shadowPaint
     )
 
@@ -1667,7 +1717,7 @@ private fun createGoogleMapsRedPlacePinBitmap(
     val whiteOutlinePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         color = android.graphics.Color.WHITE
         style = Paint.Style.STROKE
-        strokeWidth = if (isSelected) 5.5f else 4f
+        strokeWidth = if (isSelected) 5.5f else 4.2f
         strokeJoin = Paint.Join.ROUND
     }
     val redPinFillPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
@@ -1678,12 +1728,22 @@ private fun createGoogleMapsRedPlacePinBitmap(
     canvas.drawPath(pinPath, whiteOutlinePaint)
     canvas.drawPath(pinPath, redPinFillPaint)
 
-    // 3. White inner circle inside the red pin head (classic Google Maps POI marker dot)
-    val innerDotPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+    // 3. White inner circular badge + Category Icon inside the Red Pin Head
+    val badgeRadius = pinRadius * 0.68f
+    val whiteBadgePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         color = android.graphics.Color.WHITE
         style = Paint.Style.FILL
     }
-    canvas.drawCircle(pinCenterX, pinHeadCenterY, if (isSelected) 8.2f else 6.5f, innerDotPaint)
+    canvas.drawCircle(pinCenterX, pinHeadCenterY, badgeRadius, whiteBadgePaint)
+
+    drawCategoryGlyphInsidePin(
+        canvas = canvas,
+        cx = pinCenterX,
+        cy = pinHeadCenterY,
+        r = badgeRadius,
+        category = category,
+        title = title
+    )
 
     // 4. Crisp Google Maps-style Place Name Label beside the red pin
     val textBaselineY = pinHeadCenterY + (textSizePx * 0.36f)
@@ -1695,4 +1755,261 @@ private fun createGoogleMapsRedPlacePinBitmap(
         y = (pinTipY / totalH.toFloat()).coerceIn(0f, 1f)
     )
     return bmp to anchorOffset
+}
+
+/**
+ * Draws the specific category icon (Hospital Cross, Fuel Pump, School Cap, Wrench, Restaurant Fork/Knife,
+ * Bank, Police Shield, Hotel Bed, Bus, Train, Shopping Bag, Temple, etc.) inside the white badge of the Red Pin.
+ */
+internal fun resolveCategoryIconType(category: String, title: String): String {
+    val combined = "${category.lowercase(java.util.Locale.US)} ${title.lowercase(java.util.Locale.US)}"
+    return when {
+        combined.contains("hospital") || combined.contains("clinic") ||
+            combined.contains("medical") || combined.contains("doctor") ||
+            combined.contains("pharmacy") || combined.contains("chemist") ||
+            combined.contains("chc") || combined.contains("phc") ||
+            combined.contains("nursing") || combined.contains("trauma") ||
+            combined.contains("surgical") || combined.contains("chikitsa") -> "HOSPITAL"
+        combined.contains("petrol") || combined.contains("fuel") ||
+            combined.contains("oil") || combined.contains("petroleum") ||
+            combined.contains("cng") || combined.contains("charging") ||
+            combined.contains("filling") -> "FUEL"
+        combined.contains("school") || combined.contains("college") ||
+            combined.contains("university") || combined.contains("vidyalaya") ||
+            combined.contains("academy") || combined.contains("institute") ||
+            combined.contains("library") -> "SCHOOL"
+        combined.contains("service") || combined.contains("garage") ||
+            combined.contains("workshop") || combined.contains("repair") ||
+            combined.contains("motors") || combined.contains("tyre") -> "SERVICE"
+        combined.contains("restaurant") || combined.contains("cafe") ||
+            combined.contains("dhaba") || combined.contains("food") ||
+            combined.contains("bakery") || combined.contains("bhojanalaya") -> "RESTAURANT"
+        combined.contains("bank") || combined.contains("atm") ||
+            combined.contains("sbi") || combined.contains("pnb") ||
+            combined.contains("hdfc") || combined.contains("baroda") -> "BANK"
+        combined.contains("police") || combined.contains("thana") ||
+            combined.contains("kotwali") || combined.contains("chowki") -> "POLICE"
+        combined.contains("hotel") || combined.contains("lodge") ||
+            combined.contains("resort") || combined.contains("guest house") ||
+            combined.contains("dharamshala") -> "HOTEL"
+        combined.contains("bus") || combined.contains("railway") ||
+            combined.contains("train") || combined.contains("station") ||
+            combined.contains("junction") || combined.contains("isbt") -> "TRANSIT"
+        combined.contains("mall") || combined.contains("shopping") ||
+            combined.contains("supermarket") || combined.contains("mart") ||
+            combined.contains("market") || combined.contains("store") -> "SHOPPING"
+        combined.contains("temple") || combined.contains("mandir") ||
+            combined.contains("mosque") || combined.contains("masjid") ||
+            combined.contains("church") || combined.contains("gurudwara") ||
+            combined.contains("dham") || combined.contains("shrine") -> "TEMPLE"
+        else -> "LOCATION"
+    }
+}
+
+private fun drawCategoryGlyphInsidePin(
+    canvas: android.graphics.Canvas,
+    cx: Float,
+    cy: Float,
+    r: Float,
+    category: String,
+    title: String
+) {
+    val combined = "${category.lowercase( java.util.Locale.US )} ${title.lowercase( java.util.Locale.US )}"
+    val redFill = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color(0xFFD93025).toArgb()
+        style = Paint.Style.FILL
+    }
+    val redStroke = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color(0xFFD93025).toArgb()
+        style = Paint.Style.STROKE
+        strokeWidth = (r * 0.22f).coerceAtLeast(2.4f)
+        strokeCap = Paint.Cap.ROUND
+        strokeJoin = Paint.Join.ROUND
+    }
+
+    when {
+        // 1. HOSPITAL / CLINIC / MEDICAL / PHARMACY -> Bold Red Medical Cross (+) Icon
+        combined.contains("hospital") || combined.contains("clinic") ||
+            combined.contains("medical") || combined.contains("doctor") ||
+            combined.contains("pharmacy") || combined.contains("chemist") ||
+            combined.contains("chc") || combined.contains("phc") ||
+            combined.contains("nursing") || combined.contains("trauma") ||
+            combined.contains("surgical") || combined.contains("chikitsa") -> {
+            val armLen = r * 0.68f
+            val armHalfThick = (r * 0.24f).coerceAtLeast(2.4f)
+            canvas.drawRoundRect(
+                RectF(cx - armHalfThick, cy - armLen, cx + armHalfThick, cy + armLen),
+                2f,
+                2f,
+                redFill
+            )
+            canvas.drawRoundRect(
+                RectF(cx - armLen, cy - armHalfThick, cx + armLen, cy + armHalfThick),
+                2f,
+                2f,
+                redFill
+            )
+        }
+
+        // 2. PETROL PUMP / FUEL / GAS / EV CHARGING -> Fuel Dispenser Pump + Nozzle Icon
+        combined.contains("petrol") || combined.contains("fuel") ||
+            combined.contains("oil") || combined.contains("petroleum") ||
+            combined.contains("cng") || combined.contains("charging") ||
+            combined.contains("filling") -> {
+            val pumpLeft = cx - r * 0.45f
+            val pumpRight = cx + r * 0.18f
+            val pumpTop = cy - r * 0.55f
+            val pumpBottom = cy + r * 0.55f
+            canvas.drawRoundRect(RectF(pumpLeft, pumpTop, pumpRight, pumpBottom), 2.5f, 2.5f, redFill)
+            // White window inside pump
+            val winPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                color = android.graphics.Color.WHITE
+                style = Paint.Style.FILL
+            }
+            canvas.drawRect(
+                pumpLeft + r * 0.12f,
+                pumpTop + r * 0.14f,
+                pumpRight - r * 0.12f,
+                cy - r * 0.05f,
+                winPaint
+            )
+            // Nozzle hose on right
+            val hosePath = android.graphics.Path().apply {
+                moveTo(pumpRight, cy - r * 0.15f)
+                lineTo(cx + r * 0.48f, cy - r * 0.35f)
+                lineTo(cx + r * 0.48f, cy + r * 0.25f)
+                lineTo(pumpRight, cy + r * 0.35f)
+            }
+            canvas.drawPath(hosePath, redStroke)
+        }
+
+        // 3. SCHOOL / COLLEGE / UNIVERSITY / LIBRARY -> Graduation Mortarboard Cap Icon
+        combined.contains("school") || combined.contains("college") ||
+            combined.contains("university") || combined.contains("vidyalaya") ||
+            combined.contains("academy") || combined.contains("institute") ||
+            combined.contains("library") -> {
+            val capPath = android.graphics.Path().apply {
+                moveTo(cx, cy - r * 0.55f)
+                lineTo(cx + r * 0.72f, cy - r * 0.12f)
+                lineTo(cx, cy + r * 0.26f)
+                lineTo(cx - r * 0.72f, cy - r * 0.12f)
+                close()
+            }
+            canvas.drawPath(capPath, redFill)
+            canvas.drawRoundRect(
+                RectF(cx - r * 0.38f, cy + r * 0.18f, cx + r * 0.38f, cy + r * 0.52f),
+                2f,
+                2f,
+                redFill
+            )
+        }
+
+        // 4. SERVICE CENTRE / GARAGE / WORKSHOP -> Wrench / Spanner Icon
+        combined.contains("service") || combined.contains("garage") ||
+            combined.contains("workshop") || combined.contains("repair") ||
+            combined.contains("motors") || combined.contains("tyre") -> {
+            canvas.drawLine(cx - r * 0.45f, cy + r * 0.45f, cx + r * 0.25f, cy - r * 0.25f, redStroke)
+            canvas.drawCircle(cx + r * 0.30f, cy - r * 0.30f, r * 0.30f, redStroke)
+            canvas.drawCircle(cx - r * 0.42f, cy + r * 0.42f, r * 0.16f, redFill)
+        }
+
+        // 5. RESTAURANT / CAFE / FOOD / DHABA / BAKERY -> Fork & Knife Icon
+        combined.contains("restaurant") || combined.contains("cafe") ||
+            combined.contains("dhaba") || combined.contains("food") ||
+            combined.contains("bakery") || combined.contains("bhojanalaya") -> {
+            val fx = cx - r * 0.26f
+            val kx = cx + r * 0.26f
+            canvas.drawLine(fx, cy - r * 0.55f, fx, cy + r * 0.55f, redStroke)
+            canvas.drawLine(fx - r * 0.18f, cy - r * 0.55f, fx - r * 0.18f, cy - r * 0.10f, redStroke)
+            canvas.drawLine(fx + r * 0.18f, cy - r * 0.55f, fx + r * 0.18f, cy - r * 0.10f, redStroke)
+            canvas.drawLine(kx, cy - r * 0.55f, kx, cy + r * 0.55f, redStroke)
+            canvas.drawRoundRect(RectF(kx - r * 0.16f, cy - r * 0.55f, kx + r * 0.12f, cy + r * 0.02f), 2f, 2f, redFill)
+        }
+
+        // 6. ATM / BANK -> Bank Pediment & Pillars Icon
+        combined.contains("bank") || combined.contains("atm") ||
+            combined.contains("sbi") || combined.contains("pnb") ||
+            combined.contains("hdfc") || combined.contains("baroda") -> {
+            val roof = android.graphics.Path().apply {
+                moveTo(cx, cy - r * 0.62f)
+                lineTo(cx + r * 0.62f, cy - r * 0.18f)
+                lineTo(cx - r * 0.62f, cy - r * 0.18f)
+                close()
+            }
+            canvas.drawPath(roof, redFill)
+            for (dx in listOf(-0.38f, 0f, 0.38f)) {
+                canvas.drawLine(cx + r * dx, cy - r * 0.12f, cx + r * dx, cy + r * 0.42f, redStroke)
+            }
+            canvas.drawLine(cx - r * 0.55f, cy + r * 0.48f, cx + r * 0.55f, cy + r * 0.48f, redStroke)
+        }
+
+        // 7. POLICE STATION / THANA -> Police Shield Badge Icon
+        combined.contains("police") || combined.contains("thana") ||
+            combined.contains("kotwali") || combined.contains("chowki") -> {
+            val shield = android.graphics.Path().apply {
+                moveTo(cx, cy - r * 0.60f)
+                lineTo(cx + r * 0.52f, cy - r * 0.35f)
+                lineTo(cx + r * 0.42f, cy + r * 0.18f)
+                lineTo(cx, cy + r * 0.62f)
+                lineTo(cx - r * 0.42f, cy + r * 0.18f)
+                lineTo(cx - r * 0.52f, cy - r * 0.35f)
+                close()
+            }
+            canvas.drawPath(shield, redFill)
+        }
+
+        // 8. HOTEL / LODGE / RESORT -> Bed Icon
+        combined.contains("hotel") || combined.contains("lodge") ||
+            combined.contains("resort") || combined.contains("guest house") ||
+            combined.contains("dharamshala") -> {
+            canvas.drawLine(cx - r * 0.58f, cy - r * 0.42f, cx - r * 0.58f, cy + r * 0.48f, redStroke)
+            canvas.drawLine(cx - r * 0.58f, cy + r * 0.18f, cx + r * 0.58f, cy + r * 0.18f, redStroke)
+            canvas.drawLine(cx + r * 0.58f, cy - r * 0.05f, cx + r * 0.58f, cy + r * 0.48f, redStroke)
+            canvas.drawCircle(cx - r * 0.26f, cy - r * 0.10f, r * 0.18f, redFill)
+            canvas.drawRoundRect(RectF(cx - r * 0.02f, cy - r * 0.22f, cx + r * 0.52f, cy + r * 0.12f), 3f, 3f, redFill)
+        }
+
+        // 9. BUS STAND / RAILWAY STATION / TRANSIT -> Bus / Train Vehicle Icon
+        combined.contains("bus") || combined.contains("railway") ||
+            combined.contains("train") || combined.contains("station") ||
+            combined.contains("junction") || combined.contains("isbt") -> {
+            canvas.drawRoundRect(RectF(cx - r * 0.50f, cy - r * 0.52f, cx + r * 0.50f, cy + r * 0.36f), 4f, 4f, redFill)
+            val winPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                color = android.graphics.Color.WHITE
+                style = Paint.Style.FILL
+            }
+            canvas.drawRect(cx - r * 0.36f, cy - r * 0.36f, cx + r * 0.36f, cy - r * 0.02f, winPaint)
+            canvas.drawCircle(cx - r * 0.28f, cy + r * 0.48f, r * 0.14f, redFill)
+            canvas.drawCircle(cx + r * 0.28f, cy + r * 0.48f, r * 0.14f, redFill)
+        }
+
+        // 10. SHOPPING MALL / MARKET / SUPERMARKET -> Shopping Bag Icon
+        combined.contains("mall") || combined.contains("shopping") ||
+            combined.contains("supermarket") || combined.contains("mart") ||
+            combined.contains("market") || combined.contains("store") -> {
+            canvas.drawRoundRect(RectF(cx - r * 0.48f, cy - r * 0.18f, cx + r * 0.48f, cy + r * 0.55f), 3f, 3f, redFill)
+            canvas.drawArc(RectF(cx - r * 0.28f, cy - r * 0.52f, cx + r * 0.28f, cy + r * 0.04f), 180f, 180f, false, redStroke)
+        }
+
+        // 11. TEMPLE / MOSQUE / CHURCH / WORSHIP -> Temple Shikhar Dome & Flag Icon
+        combined.contains("temple") || combined.contains("mandir") ||
+            combined.contains("mosque") || combined.contains("masjid") ||
+            combined.contains("church") || combined.contains("gurudwara") ||
+            combined.contains("dham") || combined.contains("shrine") -> {
+            val dome = android.graphics.Path().apply {
+                moveTo(cx, cy - r * 0.62f)
+                lineTo(cx + r * 0.50f, cy + r * 0.15f)
+                lineTo(cx + r * 0.50f, cy + r * 0.52f)
+                lineTo(cx - r * 0.50f, cy + r * 0.52f)
+                lineTo(cx - r * 0.50f, cy + r * 0.15f)
+                close()
+            }
+            canvas.drawPath(dome, redFill)
+        }
+
+        // 12. DEFAULT / SINGLE LOCATION PIN -> Classic Google Maps Red Inner Pin Dot
+        else -> {
+            canvas.drawCircle(cx, cy, r * 0.52f, redFill)
+        }
+    }
 }

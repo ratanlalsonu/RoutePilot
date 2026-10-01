@@ -127,6 +127,7 @@ class RoutePilotViewModel(
     private var gpsTrackingJob: Job? = null
     private var recalculationJob: Job? = null
     private var searchDebounceJob: Job? = null
+    private var viewportSearchJob: Job? = null
     private var navigationStartTimestamp: Long = 0L
     private var handledHazardIdsForCurrentRoute = mutableSetOf<String>()
     private var rawBackendHazards: List<Hazard> = emptyList()
@@ -889,13 +890,18 @@ class RoutePilotViewModel(
         val currentLoc = _uiState.value.currentLocation
         val repoImpl = destinationRepository as? DestinationRepositoryImpl
         val intent = repoImpl?.parseSearchIntent(query)
+        val isCategory = intent?.isCategorySearch == true
         val fastCenter = repoImpl?.getFastSearchCenter(query, currentLoc) ?: currentLoc
-        val centerLabel = intent?.explicitLocationName
-            ?.trim()
-            ?.takeIf { it.isNotEmpty() }
-            ?.split(" ")
-            ?.joinToString(" ") { w -> w.replaceFirstChar { c -> c.uppercase() } }
-            ?: "Your Current Location"
+        val centerLabel = when {
+            !intent?.explicitLocationName.isNullOrBlank() -> {
+                intent?.explicitLocationName!!
+                    .trim()
+                    .split(" ")
+                    .joinToString(" ") { w -> w.replaceFirstChar { c -> c.uppercase() } }
+            }
+            isCategory -> "Map Area"
+            else -> query.trim()
+        }
 
         val instantSuggestions = repoImpl
             ?.getInstantPlaceSuggestions(query, currentLoc)
@@ -907,31 +913,37 @@ class RoutePilotViewModel(
                 searchQuery = query,
                 searchResults = instantSuggestions,
                 isSearchingPlaces = true,
-                searchCenterLocation = fastCenter,
+                searchCenterLocation = if (isCategory && intent?.explicitLocationName == null) null else fastCenter,
                 searchCenterLabel = centerLabel,
                 selectedCategoryChip = intent?.categorySpec?.canonicalCategory,
-                isMultiMarkerCategoryView = true,
-                fitAllMarkersTrigger = state.fitAllMarkersTrigger + 1,
+                isMultiMarkerCategoryView = isCategory,
+                fitAllMarkersTrigger = if (isCategory && instantSuggestions.isNotEmpty()) state.fitAllMarkersTrigger + 1 else state.fitAllMarkersTrigger,
                 selectedDestination = instantFirst ?: state.selectedDestination
             )
         }
         searchDebounceJob?.cancel()
         searchDebounceJob = viewModelScope.launch {
-            delay(70L)
+            delay(110L)
             val onlineCenter = repoImpl?.resolveOnlineSearchCenter(query, currentLoc) ?: fastCenter
             val res = destinationRepository.searchPlaces(query, currentLoc)
             res.onSuccess { list ->
                 if (list.isNotEmpty()) {
+                    val firstPlace = list.first()
+                    val resolvedCenter = if (isCategory) {
+                        if (!intent?.explicitLocationName.isNullOrBlank()) onlineCenter else null
+                    } else {
+                        LocationPoint(firstPlace.latitude, firstPlace.longitude)
+                    }
                     _uiState.update { state ->
                         state.copy(
                             searchResults = list,
                             isSearchingPlaces = false,
-                            searchCenterLocation = onlineCenter,
-                            searchCenterLabel = centerLabel,
+                            searchCenterLocation = resolvedCenter,
+                            searchCenterLabel = if (isCategory) centerLabel else firstPlace.name,
                             selectedCategoryChip = intent?.categorySpec?.canonicalCategory,
-                            isMultiMarkerCategoryView = true,
-                            fitAllMarkersTrigger = state.fitAllMarkersTrigger + 1,
-                            selectedDestination = list.firstOrNull() ?: state.selectedDestination
+                            isMultiMarkerCategoryView = isCategory,
+                            fitAllMarkersTrigger = if (isCategory) state.fitAllMarkersTrigger + 1 else state.fitAllMarkersTrigger,
+                            selectedDestination = firstPlace
                         )
                     }
                 } else {
@@ -952,13 +964,18 @@ class RoutePilotViewModel(
         val currentLoc = _uiState.value.currentLocation
         val repoImpl = destinationRepository as? DestinationRepositoryImpl
         val intent = repoImpl?.parseSearchIntent(trimmed)
+        val isCategory = intent?.isCategorySearch == true
         val fastCenter = repoImpl?.getFastSearchCenter(trimmed, currentLoc) ?: currentLoc
-        val centerLabel = intent?.explicitLocationName
-            ?.trim()
-            ?.takeIf { it.isNotEmpty() }
-            ?.split(" ")
-            ?.joinToString(" ") { w -> w.replaceFirstChar { c -> c.uppercase() } }
-            ?: "Your Current Location"
+        val centerLabel = when {
+            !intent?.explicitLocationName.isNullOrBlank() -> {
+                intent?.explicitLocationName!!
+                    .trim()
+                    .split(" ")
+                    .joinToString(" ") { w -> w.replaceFirstChar { c -> c.uppercase() } }
+            }
+            isCategory -> "Map Area"
+            else -> trimmed
+        }
 
         val instantSuggestions = repoImpl
             ?.getInstantPlaceSuggestions(trimmed, currentLoc)
@@ -970,11 +987,11 @@ class RoutePilotViewModel(
                 searchQuery = trimmed,
                 searchResults = instantSuggestions,
                 isSearchingPlaces = true,
-                searchCenterLocation = fastCenter,
+                searchCenterLocation = if (isCategory && intent?.explicitLocationName == null) null else fastCenter,
                 searchCenterLabel = centerLabel,
                 selectedCategoryChip = intent?.categorySpec?.canonicalCategory,
-                isMultiMarkerCategoryView = true,
-                fitAllMarkersTrigger = state.fitAllMarkersTrigger + 1,
+                isMultiMarkerCategoryView = isCategory,
+                fitAllMarkersTrigger = if (isCategory && instantSuggestions.isNotEmpty()) state.fitAllMarkersTrigger + 1 else state.fitAllMarkersTrigger,
                 selectedDestination = instantFirst ?: state.selectedDestination
             )
         }
@@ -983,18 +1000,23 @@ class RoutePilotViewModel(
             val onlineCenter = repoImpl?.resolveOnlineSearchCenter(trimmed, currentLoc) ?: fastCenter
             val res = destinationRepository.searchPlaces(trimmed, currentLoc)
             res.onSuccess { list ->
-                val firstPlace = list.firstOrNull()
                 if (list.isNotEmpty()) {
+                    val firstPlace = list.first()
+                    val resolvedCenter = if (isCategory) {
+                        if (!intent?.explicitLocationName.isNullOrBlank()) onlineCenter else null
+                    } else {
+                        LocationPoint(firstPlace.latitude, firstPlace.longitude)
+                    }
                     _uiState.update { state ->
                         state.copy(
                             searchResults = list,
                             isSearchingPlaces = false,
-                            searchCenterLocation = onlineCenter,
-                            searchCenterLabel = centerLabel,
+                            searchCenterLocation = resolvedCenter,
+                            searchCenterLabel = if (isCategory) centerLabel else firstPlace.name,
                             selectedCategoryChip = intent?.categorySpec?.canonicalCategory,
-                            isMultiMarkerCategoryView = true,
-                            fitAllMarkersTrigger = state.fitAllMarkersTrigger + 1,
-                            selectedDestination = firstPlace ?: state.selectedDestination
+                            isMultiMarkerCategoryView = isCategory,
+                            fitAllMarkersTrigger = if (isCategory) state.fitAllMarkersTrigger + 1 else state.fitAllMarkersTrigger,
+                            selectedDestination = firstPlace
                         )
                     }
                 } else {
@@ -1006,15 +1028,55 @@ class RoutePilotViewModel(
         }
     }
 
+    /**
+     * Dynamically loads real places for the active category inside the visible Google World Map
+     * viewport whenever the user pans or zooms the map.
+     */
+    fun onMapViewportChanged(
+        centerLat: Double,
+        centerLng: Double,
+        minLat: Double,
+        minLng: Double,
+        maxLat: Double,
+        maxLng: Double
+    ) {
+        val state = _uiState.value
+        val activeQuery = state.selectedCategoryChip ?: state.searchQuery.trim()
+        if (activeQuery.isBlank()) return
+        val repoImpl = destinationRepository as? DestinationRepositoryImpl ?: return
+        val intent = repoImpl.parseSearchIntent(activeQuery)
+        if (!intent.isCategorySearch) return
+
+        viewportSearchJob?.cancel()
+        viewportSearchJob = viewModelScope.launch {
+            delay(320L)
+            val newPlaces = repoImpl.searchCategoryPlacesInViewport(
+                query = intent.cleanQueryKeyword,
+                center = LocationPoint(centerLat, centerLng),
+                minLat = minLat,
+                minLng = minLng,
+                maxLat = maxLat,
+                maxLng = maxLng,
+                userOrigin = _uiState.value.currentLocation
+            )
+            if (newPlaces.isNotEmpty()) {
+                _uiState.update { cur ->
+                    val merged = repoImpl.deduplicatePlaces(cur.searchResults + newPlaces).take(120)
+                    cur.copy(
+                        searchResults = merged
+                    )
+                }
+            }
+        }
+    }
+
     fun selectCategoryChip(category: String) {
         val currentQuery = _uiState.value.searchQuery.trim()
         val repoImpl = destinationRepository as? DestinationRepositoryImpl
         val currentIntent = repoImpl?.parseSearchIntent(currentQuery)
         val explicitLocFromQuery = currentIntent?.explicitLocationName
             ?: currentQuery.takeIf {
-                it.isNotEmpty() &&
-                    currentIntent?.categorySpec == null &&
-                    DestinationRepositoryImpl.isKnownLocationName(it)
+                it.isNotEmpty() && currentIntent?.isCategorySearch == false
             }
         val combinedQuery = if (!explicitLocFromQuery.isNullOrBlank()) {
             "$category in $explicitLocFromQuery"
@@ -1027,7 +1089,7 @@ class RoutePilotViewModel(
     fun showAllSearchMarkersOnMap() {
         _uiState.update { state ->
             state.copy(
-                isMultiMarkerCategoryView = true,
+                isMultiMarkerCategoryView = state.selectedCategoryChip != null || state.searchResults.size > 1,
                 fitAllMarkersTrigger = state.fitAllMarkersTrigger + 1
             )
         }
@@ -1070,34 +1132,14 @@ class RoutePilotViewModel(
         destination: Destination,
         currentLocation: LocationPoint
     ): Destination {
-        if (!destination.id.startsWith("dest_")) return destination
-        val distMeters = GeoUtils.haversineMeters(
+        val distKm = GeoUtils.haversineMeters(
             currentLocation.latitude,
             currentLocation.longitude,
             destination.latitude,
             destination.longitude
-        )
-        if (distMeters <= 35_000.0) return destination
-
-        val refOrigin = OsmRoadNetworkProvider.DEFAULT_ORIGIN
-        val rawDLat = (destination.latitude - refOrigin.latitude) * 0.45
-        val rawDLng = (destination.longitude - refOrigin.longitude) * 0.45
-        val dLat = if (kotlin.math.abs(rawDLat) < 0.004) 0.0085 else rawDLat.coerceIn(-0.024, 0.024)
-        val dLng = if (kotlin.math.abs(rawDLng) < 0.004) 0.0110 else rawDLng.coerceIn(-0.024, 0.024)
-
-        val localLat = currentLocation.latitude + dLat
-        val localLng = currentLocation.longitude + dLng
-        val localDistKm = GeoUtils.haversineMeters(
-            currentLocation.latitude,
-            currentLocation.longitude,
-            localLat,
-            localLng
         ) / 1000.0
-
         return destination.copy(
-            latitude = localLat,
-            longitude = localLng,
-            distanceFromUserKm = (localDistKm * 1.25).coerceAtLeast(1.2)
+            distanceFromUserKm = distKm
         )
     }
 

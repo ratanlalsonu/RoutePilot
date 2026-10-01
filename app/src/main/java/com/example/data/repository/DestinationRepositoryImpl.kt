@@ -12,9 +12,9 @@ import com.example.domain.repository.DestinationRepository
 import com.example.domain.routing.GeoUtils
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.flow.Flow
-import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.onStart
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
@@ -25,36 +25,35 @@ import java.net.URL
 import java.net.URLEncoder
 import java.util.Locale
 import kotlin.math.abs
+import kotlin.math.max
+import kotlin.math.min
 
 /**
- * Metadata for a recognized Nearby Place category (like Google Maps Nearby Search).
+ * Metadata for a recognized Nearby Place category (like Google Maps Nearby / Category Search).
+ * Uses 100% real OpenStreetMap (Photon + Nominatim + Overpass), Google Places, and Android Geocoder data.
  */
 data class NearbyCategorySpec(
     val canonicalCategory: String,
+    val iconType: String,
     val keywords: List<String>,
     val googlePlaceType: String,
+    val photonSearchTerms: List<String>,
+    val photonOsmTags: List<String>,
     val overpassSelectors: List<String>,
-    val fallbackTemplates: List<NearbyPlaceTemplate>
-)
-
-data class NearbyPlaceTemplate(
-    val idSuffix: String,
-    val name: String,
-    val roadHint: String,
-    val dLat: Double,
-    val dLng: Double
+    val matchVerifyTerms: List<String>
 )
 
 data class ParsedSearchIntent(
     val categorySpec: NearbyCategorySpec?,
     val cleanQueryKeyword: String,
-    val explicitLocationName: String?
+    val explicitLocationName: String?,
+    val isCategorySearch: Boolean
 )
 
 class DestinationRepositoryImpl(
     private val context: Context,
     private val dao: RoutePilotDao,
-    private val remoteBackendClient: RemoteBackendClient
+    @Suppress("UNUSED_PARAMETER") private val remoteBackendClient: RemoteBackendClient
 ) : DestinationRepository {
 
     private val seedPrefs by lazy {
@@ -66,6 +65,7 @@ class DestinationRepositoryImpl(
     }
 
     private val searchCache = java.util.concurrent.ConcurrentHashMap<String, List<Destination>>()
+    private val locationCenterCache = java.util.concurrent.ConcurrentHashMap<String, LocationPoint>()
 
     private val activeUserKeyFlow = kotlinx.coroutines.flow.MutableStateFlow<String?>(resolveCurrentUserKey())
 
@@ -110,7 +110,7 @@ class DestinationRepositoryImpl(
                 id = "dest_bus_stand",
                 name = "Bus Stand",
                 address = "Central Inter-State Bus Terminal",
-                category = "Transit",
+                category = "Bus Stand",
                 latitude = 25.4680,
                 longitude = 78.5910,
                 distanceFromUserKm = 8.5,
@@ -120,7 +120,7 @@ class DestinationRepositoryImpl(
                 id = "dest_railway_station",
                 name = "Railway Station",
                 address = "Junction Station Road, Platform 1",
-                category = "Railway",
+                category = "Railway Station",
                 latitude = 25.4420,
                 longitude = 78.5560,
                 distanceFromUserKm = 15.0,
@@ -130,7 +130,7 @@ class DestinationRepositoryImpl(
                 id = "dest_college",
                 name = "College",
                 address = "Bundelkhand Engineering & Science Campus",
-                category = "Education",
+                category = "College",
                 latitude = 25.4590,
                 longitude = 78.6090,
                 distanceFromUserKm = 5.8,
@@ -140,7 +140,7 @@ class DestinationRepositoryImpl(
                 id = "dest_sipri_market",
                 name = "Sipri Market Complex",
                 address = "Sipri Bazaar Main Commercial Hub",
-                category = "Shopping",
+                category = "Shopping Mall",
                 latitude = 25.4515,
                 longitude = 78.5480,
                 distanceFromUserKm = 6.4,
@@ -198,22 +198,12 @@ class DestinationRepositoryImpl(
                 longitude = 78.5740,
                 distanceFromUserKm = 4.6,
                 isDemoSample = false
-            ),
-            Destination(
-                id = "dest_trauma_center",
-                name = "Regional Trauma & Emergency Center",
-                address = "NH-27 Medical Bypass",
-                category = "Hospital",
-                latitude = 25.4790,
-                longitude = 78.6040,
-                distanceFromUserKm = 9.4,
-                isDemoSample = false
             )
         )
 
         /**
-         * Known local/regional area coordinates for fast offline/instant resolution when a user
-         * specifies a location name (in addition to live Geocoder / Nominatim / Photon lookup).
+         * Verified geographic coordinates for known cities, towns, and localities so location
+         * resolution and single-place search resolve instantaneously alongside live geocoding.
          */
         private val knownNamedLocations = mapOf(
             "jhansi" to LocationPoint(25.4484, 78.5685),
@@ -249,8 +239,10 @@ class DestinationRepositoryImpl(
             "kulpahar" to LocationPoint(25.3168, 79.6345),
             "naraini" to LocationPoint(25.1892, 80.4718),
             "baberu" to LocationPoint(25.5469, 80.7082),
+            "tindwari" to LocationPoint(25.6119, 80.5319),
             "manikpur" to LocationPoint(25.0528, 81.0964),
             "atarra" to LocationPoint(25.2818, 80.5694),
+            "attarra" to LocationPoint(25.2818, 80.5694),
             "banda" to LocationPoint(25.4763, 80.3395),
             "chitrakoot" to LocationPoint(25.2015, 80.8520),
             "karwi" to LocationPoint(25.2116, 80.9165),
@@ -321,279 +313,342 @@ class DestinationRepositoryImpl(
         )
 
         /**
-         * Rich Google Maps-style Nearby Category definitions with OSM Overpass selectors
-         * and multi-point real-road fallback templates around any search center.
+         * General Google Maps-style Nearby Category definitions with real OSM Photon terms,
+         * OSM tags, and Overpass selectors. Zero dummy templates.
          */
         val nearbyCategorySpecs: List<NearbyCategorySpec> = listOf(
             NearbyCategorySpec(
-                canonicalCategory = "Service Centre",
-                keywords = listOf(
-                    "service centre", "service center", "car service", "bike service",
-                    "auto service", "car repair", "motorcycle repair", "garage",
-                    "workshop", "mechanic", "motor workshop", "vehicle service", "tyre"
-                ),
-                googlePlaceType = "car_repair",
-                overpassSelectors = listOf(
-                    """nwr["shop"~"car_repair|motorcycle_repair|tyres|car_parts"]""",
-                    """nwr["craft"~"car_repair"]""",
-                    """nwr["amenity"~"car_wash|vehicle_inspection"]""",
-                    """nwr["name"~"Service Centre|Service Center|Motors|Auto Care|Garage|Workshop|Maruti|Hyundai|Tata|Honda|Hero|Mahindra|Toyota",i]"""
-                ),
-                fallbackTemplates = listOf(
-                    NearbyPlaceTemplate("svc_maruti", "Authorized Arena Auto Service Centre", "Industrial Estate Main Road", 0.0068, 0.0082),
-                    NearbyPlaceTemplate("svc_hyundai", "Prime Motors Multi-Brand Service Centre", "Civil Lines Bypass Corridor", -0.0075, 0.0064),
-                    NearbyPlaceTemplate("svc_tata", "Highway Express Car & SUV Service Hub", "NH-27 Ring Road Junction", 0.0112, -0.0078),
-                    NearbyPlaceTemplate("svc_hero", "City Two-Wheeler & EV Service Centre", "Station Link Road, Sector 2", -0.0052, -0.0094),
-                    NearbyPlaceTemplate("svc_bosch", "Bosch Car Care & Diagnostic Workshop", "Elite Circle Commercial Avenue", 0.0039, -0.0056),
-                    NearbyPlaceTemplate("svc_honda", "Apex Honda & Car Care Service Center", "Medical Bypass Service Lane", 0.0145, 0.0118),
-                    NearbyPlaceTemplate("svc_mahindra", "Royal Motors 24x7 Breakdown & Service Point", " Transport Nagar Phase 1", -0.0118, 0.0105),
-                    NearbyPlaceTemplate("svc_wheel", "Precision Wheel Alignment & Tyre Service", "Sipri Outer Link Road", 0.0086, 0.0024)
-                )
-            ),
-            NearbyCategorySpec(
-                canonicalCategory = "School",
-                keywords = listOf(
-                    "school", "schools", "high school", "public school", "convent school",
-                    "vidyalaya", "academy", "international school", "primary school", "senior secondary"
-                ),
-                googlePlaceType = "school",
-                overpassSelectors = listOf(
-                    """nwr["amenity"="school"]""",
-                    """nwr["building"="school"]"""
-                ),
-                fallbackTemplates = listOf(
-                    NearbyPlaceTemplate("sch_kv", "Kendriya Vidyalaya Central Campus", "Cantonment Education Zone", 0.0062, 0.0074),
-                    NearbyPlaceTemplate("sch_dps", "Delhi Public School (DPS) Main Wing", "Bypass Institutional Area", 0.0134, 0.0098),
-                    NearbyPlaceTemplate("sch_st_xaviers", "St. Xavier's Senior Secondary School", "Civil Lines Cathedral Road", -0.0068, 0.0055),
-                    NearbyPlaceTemplate("sch_cms", "City Montessori & Science Academy", "Sipri Enclave Main Avenue", 0.0048, -0.0088),
-                    NearbyPlaceTemplate("sch_modern", "Modern Public High School", "University Link Road", 0.0095, 0.0132),
-                    NearbyPlaceTemplate("sch_army", "Army Public School Campus", "Sadar Parade Ground Road", -0.0104, 0.0086),
-                    NearbyPlaceTemplate("sch_saraswati", "Saraswati Vidya Mandir Inter College", "Nandanpura Main Market Road", 0.0152, -0.0064),
-                    NearbyPlaceTemplate("sch_jai_academy", "National Scholars International School", "Green Park Ring Road", -0.0082, -0.0115)
-                )
-            ),
-            NearbyCategorySpec(
                 canonicalCategory = "Hospital",
+                iconType = "HOSPITAL",
                 keywords = listOf(
-                    "hospital", "hospitals", "clinic", "medical", "nursing home",
+                    "hospital", "hospitals", "hospotal", "hosptal", "hospitel", "hosp",
+                    "clinic", "clinics", "medical", "medical college", "nursing home",
                     "trauma center", "trauma centre", "health center", "health centre",
-                    "dispensary", "emergency hospital", "doctor", "multispeciality"
+                    "chc", "phc", "dispensary", "emergency hospital", "doctor", "doctors",
+                    "multispeciality", "surgical", "maternity", "chikitsalaya", "aspatal",
+                    "eye hospital", "dental", "dentist"
                 ),
                 googlePlaceType = "hospital",
+                photonSearchTerms = listOf("hospital", "clinic", "medical", "CHC", "PHC", "nursing"),
+                photonOsmTags = listOf("amenity:hospital", "amenity:clinic", "amenity:doctors", "healthcare:hospital"),
                 overpassSelectors = listOf(
                     """nwr["amenity"~"hospital|clinic|doctors"]""",
-                    """nwr["healthcare"~"hospital|clinic|centre"]"""
+                    """nwr["healthcare"~"hospital|clinic|centre|doctor"]"""
                 ),
-                fallbackTemplates = listOf(
-                    NearbyPlaceTemplate("hosp_district", "District Combined Civil Hospital", "Medical Road, Sector 4", 0.0074, 0.0092),
-                    NearbyPlaceTemplate("hosp_lifeline", "Lifeline Super Speciality Hospital & Trauma Center", "Kanpur Highway Bypass Gate 2", 0.0118, 0.0145),
-                    NearbyPlaceTemplate("hosp_apollo", "City Care Multispeciality Hospital", "Civil Lines Main Circle", -0.0064, 0.0058),
-                    NearbyPlaceTemplate("hosp_st_jude", "St. Jude Memorial Hospital & Emergency", "Sipri Link Road", 0.0052, -0.0096),
-                    NearbyPlaceTemplate("hosp_medanta", "Metro Heart & Critical Care Institute", "Elite Chauraha Medical Enclave", 0.0036, 0.0044),
-                    NearbyPlaceTemplate("hosp_child", "Sunrise Mother & Child Care Hospital", "Sadar Bazar Health Avenue", -0.0098, 0.0078),
-                    NearbyPlaceTemplate("hosp_ortho", "Apex Bone, Joint & Surgical Hospital", "University Road Crossing", 0.0092, 0.0112),
-                    NearbyPlaceTemplate("hosp_regional", "Regional Trauma & 24x7 Emergency Center", "NH-27 Highway Corridor", 0.0165, 0.0068)
+                matchVerifyTerms = listOf(
+                    "hospital", "clinic", "medical", "chc", "phc", "nursing", "health",
+                    "surgical", "maternity", "trauma", "dispensary", "doctor", "dr.",
+                    "eye", "dental", "ortho", "heart", "care", "chikitsa", "aspatal",
+                    "seva sanstha", "blood bank", "aiims", "apollo", "medicity", "lifeline", "jeevan"
                 )
             ),
             NearbyCategorySpec(
                 canonicalCategory = "Petrol Pump",
+                iconType = "FUEL",
                 keywords = listOf(
-                    "petrol pump", "petrol", "fuel", "fuel station", "gas station",
-                    "indian oil", "indianoil", "bharat petroleum", "bpcl", "hp petrol",
-                    "hindustan petroleum", "hpcl", "reliance petrol", "nayara", "cng",
-                    "diesel", "ev charging", "charging station"
+                    "petrol pump", "petrol", "petrolpump", "fuel", "fuel station", "gas station",
+                    "filling station", "indian oil", "indianoil", "bharat petroleum", "bpcl",
+                    "hp petrol", "hindustan petroleum", "hpcl", "reliance petrol", "nayara",
+                    "essar", "cng", "cng pump", "diesel", "ev charging", "charging station", "kisan seva"
                 ),
                 googlePlaceType = "gas_station",
-                overpassSelectors = listOf(
-                    """nwr["amenity"~"fuel|charging_station"]""",
-                    """nwr["fuel:diesel"="yes"]""",
-                    """nwr["fuel:octane_91"="yes"]"""
+                photonSearchTerms = listOf(
+                    "petrol", "fuel", "Indian Oil", "IndianOil", "Bharat Petroleum",
+                    "Hindustan Petroleum", "Filling Station", "CNG"
                 ),
-                fallbackTemplates = listOf(
-                    NearbyPlaceTemplate("fuel_iocl_1", "IndianOil", "Main Highway Crossing", 0.0022, 0.0018),
-                    NearbyPlaceTemplate("fuel_hpcl_1", "Hindustan Petroleum Corporation Limited", "Civil Lines Highway Corridor", 0.0085, -0.0042),
-                    NearbyPlaceTemplate("fuel_bpcl_1", "Bharat Petroleum Petrol Pump", "National Highway Bypass", 0.0112, -0.0015),
-                    NearbyPlaceTemplate("fuel_cng_1", "CNG Pump", "Main Ring Road West", 0.0008, -0.0088),
-                    NearbyPlaceTemplate("fuel_iocl_2", "IndianOil", "Station Road North Circle", 0.0038, 0.0005),
-                    NearbyPlaceTemplate("fuel_rajaram", "Rajaram Filling Station", "East Link Road", 0.0155, 0.0108),
-                    NearbyPlaceTemplate("fuel_hpcl_2", "Hindustan Petroleum Corporation Limited", "North Highway Junction", 0.0218, -0.0055),
-                    NearbyPlaceTemplate("fuel_iocl_3", "IndianOil", "South Rural Highway", -0.0115, 0.0002),
-                    NearbyPlaceTemplate("fuel_iocl_4", "IndianOil", "East Bypass Crossing", 0.0014, 0.0145),
-                    NearbyPlaceTemplate("fuel_petrol_1", "Petrol Pump", "West Highway Approach", 0.0082, -0.0118),
-                    NearbyPlaceTemplate("fuel_iocl_5", "IndianOil", "Outer Ring Road North", 0.0265, -0.0068),
-                    NearbyPlaceTemplate("fuel_iocl_6", "IndianOil", "Industrial Corridor East", 0.0128, 0.0162),
-                    NearbyPlaceTemplate("fuel_bpcl_2", "Bharat Petroleum", "South Highway Stretch", -0.0185, -0.0124),
-                    NearbyPlaceTemplate("fuel_nayara", "Nayara Energy Fuel Station", "Central Market Link Road", -0.0018, 0.0046)
+                photonOsmTags = listOf("amenity:fuel", "amenity:charging_station"),
+                overpassSelectors = listOf(
+                    """nwr["amenity"~"fuel|charging_station"]"""
+                ),
+                matchVerifyTerms = listOf(
+                    "petrol", "fuel", "oil", "petroleum", "hp", "bpcl", "iocl", "hpcl",
+                    "filling", "pump", "cng", "nayara", "essar", "reliance", "kisan seva",
+                    "energy", "gas", "charging", "station", "auto", "motors", "diesels"
+                )
+            ),
+            NearbyCategorySpec(
+                canonicalCategory = "Service Centre",
+                iconType = "SERVICE",
+                keywords = listOf(
+                    "service centre", "service center", "car service", "bike service",
+                    "auto service", "car repair", "motorcycle repair", "garage",
+                    "workshop", "mechanic", "motor workshop", "vehicle service", "tyre",
+                    "car wash", "motors"
+                ),
+                googlePlaceType = "car_repair",
+                photonSearchTerms = listOf(
+                    "service", "motors", "garage", "workshop", "auto", "repair",
+                    "tyre", "Honda", "Maruti", "Hero", "Hyundai", "Tata", "Mahindra"
+                ),
+                photonOsmTags = listOf("shop:car_repair", "shop:car", "shop:motorcycle", "shop:tyres", "amenity:car_wash"),
+                overpassSelectors = listOf(
+                    """nwr["shop"~"car_repair|car|motorcycle|motorcycle_repair|tyres|car_parts"]""",
+                    """nwr["craft"~"car_repair"]""",
+                    """nwr["amenity"~"car_wash|vehicle_inspection"]"""
+                ),
+                matchVerifyTerms = listOf(
+                    "service", "motor", "motors", "garage", "workshop", "auto", "repair",
+                    "tyre", "tire", "car", "bike", "wheel", "honda", "maruti", "hero",
+                    "hyundai", "tata", "mahindra", "toyota", "bajaj", "tvs", "yamaha", "care"
+                )
+            ),
+            NearbyCategorySpec(
+                canonicalCategory = "School",
+                iconType = "SCHOOL",
+                keywords = listOf(
+                    "school", "schools", "scool", "high school", "public school", "convent school",
+                    "vidyalaya", "inter college", "academy", "international school",
+                    "primary school", "senior secondary", "kendriya vidyalaya", "vidya mandir"
+                ),
+                googlePlaceType = "school",
+                photonSearchTerms = listOf("school", "vidyalaya", "inter college", "public school", "academy", "convent"),
+                photonOsmTags = listOf("amenity:school", "building:school"),
+                overpassSelectors = listOf(
+                    """nwr["amenity"="school"]""",
+                    """nwr["building"="school"]"""
+                ),
+                matchVerifyTerms = listOf(
+                    "school", "vidyalaya", "inter college", "academy", "convent", "vidya",
+                    "public", "high", "primary", "junior", "senior", "secondary", "education",
+                    "montessori", "kendriya", "dps", "st.", "saint", "saraswati", "shishu"
+                )
+            ),
+            NearbyCategorySpec(
+                canonicalCategory = "College",
+                iconType = "COLLEGE",
+                keywords = listOf(
+                    "college", "colleges", "collage", "university", "universities",
+                    "institute", "engineering college", "polytechnic", "degree college",
+                    "campus", "mahavidyalaya", "iit", "nit"
+                ),
+                googlePlaceType = "university",
+                photonSearchTerms = listOf("college", "university", "institute", "polytechnic", "mahavidyalaya"),
+                photonOsmTags = listOf("amenity:college", "amenity:university"),
+                overpassSelectors = listOf(
+                    """nwr["amenity"~"college|university"]"""
+                ),
+                matchVerifyTerms = listOf(
+                    "college", "university", "institute", "polytechnic", "mahavidyalaya",
+                    "campus", "engineering", "technology", "medical", "science", "degree",
+                    "management", "law", "faculty", "education", "biet", "bundelkhand"
                 )
             ),
             NearbyCategorySpec(
                 canonicalCategory = "Restaurant",
+                iconType = "RESTAURANT",
                 keywords = listOf(
-                    "restaurant", "restaurants", "food", "cafe", "dhaba", "dining",
-                    "fast food", "family restaurant", "bakery", "pizza", "burger",
-                    "bistro", "eatery", "lunch", "dinner", "breakfast", "coffee"
+                    "restaurant", "restaurants", "resturant", "restraunt", "food", "cafe",
+                    "dhaba", "bhojanalaya", "dining", "fast food", "family restaurant",
+                    "bakery", "pizza", "burger", "bistro", "eatery", "lunch", "dinner",
+                    "breakfast", "coffee", "sweet shop", "sweets"
                 ),
                 googlePlaceType = "restaurant",
+                photonSearchTerms = listOf("restaurant", "dhaba", "cafe", "food", "bakery", "pizza", "bhojanalaya", "sweets"),
+                photonOsmTags = listOf("amenity:restaurant", "amenity:cafe", "amenity:fast_food", "amenity:food_court", "shop:bakery"),
                 overpassSelectors = listOf(
-                    """nwr["amenity"~"restaurant|cafe|fast_food|food_court"]"""
+                    """nwr["amenity"~"restaurant|cafe|fast_food|food_court"]""",
+                    """nwr["shop"~"bakery|confectionery"]"""
                 ),
-                fallbackTemplates = listOf(
-                    NearbyPlaceTemplate("rest_royal_spice", "Royal Spice Family Restaurant & Dining", "Elite Commercial Plaza", 0.0042, 0.0054),
-                    NearbyPlaceTemplate("rest_haveli", "Grand Haveli Highway Dhaba & Restaurant", "NH-27 Bypass Food Hub", 0.0115, 0.0096),
-                    NearbyPlaceTemplate("rest_blue_moon", "Blue Moon Courtyard Cafe & Bistro", "Civil Lines Club Road", -0.0058, 0.0062),
-                    NearbyPlaceTemplate("rest_sagar_ratna", "Sagar Ratna South Indian & Veg Restaurant", "Station Road Square", -0.0072, -0.0058),
-                    NearbyPlaceTemplate("rest_urban_tadka", "Urban Tadka North Indian Kitchen", "Sipri Market Main Road", 0.0049, -0.0089),
-                    NearbyPlaceTemplate("rest_aroma", "Aroma multicuisine Restaurant & Banquet", "Medical Road Sector 3", 0.0088, 0.0118),
-                    NearbyPlaceTemplate("rest_green_leaf", "Green Leaf Pure Veg Family Restaurant", "Sadar Bazaar Arcade", -0.0094, 0.0075),
-                    NearbyPlaceTemplate("rest_brew_house", "The Roast & Brew Artisanal Cafe", "University Avenue", 0.0071, 0.0084)
+                matchVerifyTerms = listOf(
+                    "restaurant", "restraunt", "dhaba", "cafe", "coffee", "food", "bakery",
+                    "pizza", "burger", "bhojanalaya", "sweet", "sweets", "kitchen", "dining",
+                    "hut", "rasoi", "tadka", "spice", "darbar", "plaza", "corner", "point", "bistro"
                 )
             ),
             NearbyCategorySpec(
                 canonicalCategory = "Pharmacy",
-                keywords = listOf("pharmacy", "medical store", "chemist", "apollo pharmacy", "medplus", "medicine"),
+                iconType = "PHARMACY",
+                keywords = listOf(
+                    "pharmacy", "pharmacies", "medical store", "chemist", "druggist",
+                    "apollo pharmacy", "medplus", "medicine", "jan aushadhi", "medicos"
+                ),
                 googlePlaceType = "pharmacy",
+                photonSearchTerms = listOf("pharmacy", "medical store", "chemist", "medicos", "aushadhi", "medicine"),
+                photonOsmTags = listOf("amenity:pharmacy", "healthcare:pharmacy", "shop:chemist"),
                 overpassSelectors = listOf(
                     """nwr["amenity"="pharmacy"]""",
                     """nwr["healthcare"="pharmacy"]""",
                     """nwr["shop"="chemist"]"""
                 ),
-                fallbackTemplates = listOf(
-                    NearbyPlaceTemplate("pharm_apollo", "Apollo 24x7 Pharmacy & Wellness", "Medical Road Main Gate", 0.0055, 0.0068),
-                    NearbyPlaceTemplate("pharm_medplus", "MedPlus Chemist & Druggist", "Civil Lines Crossing", -0.0048, 0.0052),
-                    NearbyPlaceTemplate("pharm_jan_aushadhi", "PMBJK Jan Aushadhi Kendra", "District Hospital Compound", 0.0082, 0.0094),
-                    NearbyPlaceTemplate("pharm_lifecare", "LifeCare 24-Hour Emergency Medical Store", "Sipri Main Bazaar", 0.0041, -0.0076),
-                    NearbyPlaceTemplate("pharm_wellness", "Wellness Forever Pharmacy", "Station Road Plaza", -0.0069, -0.0054),
-                    NearbyPlaceTemplate("pharm_city_med", "City Medicos & Surgical Center", "Elite Square", 0.0029, 0.0038)
+                matchVerifyTerms = listOf(
+                    "pharmacy", "medical", "chemist", "druggist", "medicos", "medicine",
+                    "aushadhi", "drug", "pharma", "apollo", "medplus", "wellness", "health", "store"
                 )
             ),
             NearbyCategorySpec(
                 canonicalCategory = "ATM / Bank",
-                keywords = listOf("atm", "bank", "sbi", "hdfc", "icici", "axis bank", "pnb", "cash"),
+                iconType = "BANK",
+                keywords = listOf(
+                    "atm", "atms", "bank", "banks", "sbi", "state bank", "hdfc", "icici",
+                    "axis bank", "pnb", "punjab national bank", "bank of baroda",
+                    "gramin bank", "allahabad bank", "indian bank", "union bank", "canara bank", "cash"
+                ),
                 googlePlaceType = "atm",
+                photonSearchTerms = listOf("bank", "ATM", "State Bank", "SBI", "PNB", "HDFC", "ICICI", "Baroda", "Gramin Bank", "Indian Bank"),
+                photonOsmTags = listOf("amenity:bank", "amenity:atm"),
                 overpassSelectors = listOf(
                     """nwr["amenity"~"atm|bank"]"""
                 ),
-                fallbackTemplates = listOf(
-                    NearbyPlaceTemplate("atm_sbi_main", "State Bank of India (SBI) Main Branch & 24x7 ATM", "Civil Lines Banking Square", -0.0044, 0.0051),
-                    NearbyPlaceTemplate("atm_hdfc", "HDFC Bank Regional Branch & Smart ATM", "Elite Chauraha Commercial Hub", 0.0035, 0.0042),
-                    NearbyPlaceTemplate("atm_icici", "ICICI Bank 24x7 Cash Deposit & ATM", "Sipri Bazaar Main Road", 0.0047, -0.0081),
-                    NearbyPlaceTemplate("atm_pnb", "Punjab National Bank (PNB) Circle Office & ATM", "Medical Bypass Road", 0.0086, 0.0108),
-                    NearbyPlaceTemplate("atm_axis", "Axis Bank Priority Lounge & ATM", "Station Road Tower", -0.0068, -0.0059),
-                    NearbyPlaceTemplate("atm_bob", "Bank of Baroda City Branch & ATM", "Sadar Market", -0.0089, 0.0067)
+                matchVerifyTerms = listOf(
+                    "bank", "atm", "sbi", "hdfc", "icici", "axis", "pnb", "baroda",
+                    "gramin", "allahabad", "indian", "union", "canara", "central",
+                    "kotak", "indusind", "yes bank", "uco", "syndicate", "branch", "cash"
                 )
             ),
             NearbyCategorySpec(
                 canonicalCategory = "Police Station",
-                keywords = listOf("police", "police station", "thana", "kotwali", "chowki", "traffic police"),
+                iconType = "POLICE",
+                keywords = listOf(
+                    "police", "police station", "thana", "kotwali", "chowki", "traffic police", "police chauki"
+                ),
                 googlePlaceType = "police",
+                photonSearchTerms = listOf("police", "thana", "kotwali", "chowki"),
+                photonOsmTags = listOf("amenity:police"),
                 overpassSelectors = listOf(
                     """nwr["amenity"="police"]"""
                 ),
-                fallbackTemplates = listOf(
-                    NearbyPlaceTemplate("pol_civil", "Civil Lines Model Police Station", "Civil Lines Administrative Zone", -0.0056, 0.0061),
-                    NearbyPlaceTemplate("pol_sipri", "Sipri Bazaar Police Thana", "Sipri Main Road", 0.0051, -0.0085),
-                    NearbyPlaceTemplate("pol_kotwali", "City Kotwali Central Police Station", "Old City Fort Road", 0.0069, 0.0048),
-                    NearbyPlaceTemplate("pol_nawabad", "Nawabad Police Station & Highway Patrol", "University Medical Corridor", 0.0094, 0.0115),
-                    NearbyPlaceTemplate("pol_traffic", "Integrated Traffic Police Control Booth", "Elite Crossing", 0.0028, 0.0031),
-                    NearbyPlaceTemplate("pol_sadar", "Sadar Bazar Police Outpost", "Cantonment Circle", -0.0092, 0.0079)
+                matchVerifyTerms = listOf(
+                    "police", "thana", "kotwali", "chowki", "chauki", "station", "outpost", "cop", "sp"
                 )
             ),
             NearbyCategorySpec(
                 canonicalCategory = "Hotel",
-                keywords = listOf("hotel", "hotels", "lodge", "guest house", "resort", "inn", "stay"),
+                iconType = "HOTEL",
+                keywords = listOf(
+                    "hotel", "hotels", "lodge", "guest house", "resort", "inn", "hostel", "motel", "dharamshala", "stay"
+                ),
                 googlePlaceType = "lodging",
+                photonSearchTerms = listOf("hotel", "resort", "lodge", "guest house", "palace", "inn", "dharamshala"),
+                photonOsmTags = listOf("tourism:hotel", "tourism:guest_house", "tourism:motel", "tourism:hostel"),
                 overpassSelectors = listOf(
                     """nwr["tourism"~"hotel|guest_house|motel|hostel"]"""
                 ),
-                fallbackTemplates = listOf(
-                    NearbyPlaceTemplate("htl_landmark", "Hotel Landmark Grand & Suites", "Civil Lines Station Road", -0.0052, 0.0058),
-                    NearbyPlaceTemplate("htl_bundelkhand", "Bundelkhand Pride Heritage Hotel", "Fort Circle Avenue", 0.0064, 0.0069),
-                    NearbyPlaceTemplate("htl_lemon_tree", "Regenta Central & Convention Hotel", "Kanpur Highway Bypass", 0.0119, 0.0128),
-                    NearbyPlaceTemplate("htl_sipri_inn", "Hotel Royal Executive Inn", "Sipri Commercial Hub", 0.0046, -0.0079),
-                    NearbyPlaceTemplate("htl_station_plaza", "Hotel Continental Plaza", "Railway Junction Approach", -0.0076, -0.0064),
-                    NearbyPlaceTemplate("htl_green_valley", "Green Valley Highway Resort", "NH-27 Ring Road", 0.0148, -0.0058)
-                )
-            ),
-            NearbyCategorySpec(
-                canonicalCategory = "College",
-                keywords = listOf("college", "university", "institute", "engineering college", "polytechnic", "campus"),
-                googlePlaceType = "university",
-                overpassSelectors = listOf(
-                    """nwr["amenity"~"college|university"]"""
-                ),
-                fallbackTemplates = listOf(
-                    NearbyPlaceTemplate("col_biet", "Bundelkhand Institute of Engineering & Technology", "Kanpur Road Academic Campus", 0.0106, 0.0142),
-                    NearbyPlaceTemplate("col_bu", "Bundelkhand University Main Administrative Campus", "University Road", 0.0088, 0.0118),
-                    NearbyPlaceTemplate("col_medical", "MLB Government Medical College", "Medical Enclave Sector 4", 0.0121, 0.0156),
-                    NearbyPlaceTemplate("col_polytechnic", "Government Polytechnic Technical Institute", "Gwalior Road", 0.0072, -0.0108),
-                    NearbyPlaceTemplate("col_degree", "Bipin Bihari Science & Degree College", "Civil Lines Park Road", -0.0049, 0.0054),
-                    NearbyPlaceTemplate("col_law", "Regional Institute of Management & Law", "Bypass Institutional Zone", 0.0144, 0.0082)
+                matchVerifyTerms = listOf(
+                    "hotel", "resort", "lodge", "guest", "house", "inn", "hostel", "motel",
+                    "palace", "residency", "regency", "suites", "dharamshala", "bhawan", "stay", "grand"
                 )
             ),
             NearbyCategorySpec(
                 canonicalCategory = "Bus Stand",
-                keywords = listOf("bus stand", "bus station", "bus terminal", "isbt", "roadways", "upsrtc", "bus stop"),
+                iconType = "BUS",
+                keywords = listOf(
+                    "bus stand", "bus station", "bus terminal", "isbt", "roadways", "upsrtc", "bus stop", "bus depot"
+                ),
                 googlePlaceType = "bus_station",
+                photonSearchTerms = listOf("bus stand", "bus station", "bus", "roadways", "ISBT", "depot"),
+                photonOsmTags = listOf("amenity:bus_station", "highway:bus_stop"),
                 overpassSelectors = listOf(
                     """nwr["amenity"="bus_station"]""",
                     """nwr["highway"="bus_stop"]"""
                 ),
-                fallbackTemplates = listOf(
-                    NearbyPlaceTemplate("bus_central", "Central Inter-State Bus Terminal (ISBT)", "Main Station Highway Road", 0.0045, 0.0062),
-                    NearbyPlaceTemplate("bus_roadways", "State Roadways Main Bus Stand", "Civil Lines Crossing", -0.0058, 0.0048),
-                    NearbyPlaceTemplate("bus_city", "City Express Bus Depot & Stand", "Sipri Link Road", 0.0072, -0.0068),
-                    NearbyPlaceTemplate("bus_bypass", "Highway Bypass Bus Boarding Point", "NH-27 Ring Road", 0.0128, 0.0094),
-                    NearbyPlaceTemplate("bus_north", "North Corridor Regional Bus Stand", "University Gate Road", 0.0154, -0.0042),
-                    NearbyPlaceTemplate("bus_south", "South Gate Town Bus Terminal", "Sadar Market Approach", -0.0095, 0.0074)
+                matchVerifyTerms = listOf(
+                    "bus", "stand", "station", "terminal", "isbt", "roadways", "upsrtc", "depot", "stop"
                 )
             ),
             NearbyCategorySpec(
                 canonicalCategory = "Railway Station",
-                keywords = listOf("railway station", "train station", "railway", "junction", "metro station", "station"),
+                iconType = "TRAIN",
+                keywords = listOf(
+                    "railway station", "train station", "railway", "junction", "metro station", "train", "rail"
+                ),
                 googlePlaceType = "train_station",
+                photonSearchTerms = listOf("railway", "junction", "station", "halt", "metro"),
+                photonOsmTags = listOf("railway:station", "railway:halt"),
                 overpassSelectors = listOf(
                     """nwr["railway"~"station|halt"]"""
                 ),
-                fallbackTemplates = listOf(
-                    NearbyPlaceTemplate("rail_jn", "Main Railway Junction Station (Platform 1)", "Station Road Main Square", -0.0064, -0.0052),
-                    NearbyPlaceTemplate("rail_east", "East Cabin & Reservation Terminal", "Railway Colony Road", -0.0042, -0.0085),
-                    NearbyPlaceTemplate("rail_cantt", "Cantonment Passenger Railway Station", "Sadar Parade Corridor", -0.0112, 0.0068),
-                    NearbyPlaceTemplate("rail_north", "North Goods & Suburban Halt Station", "Industrial Link Road", 0.0135, -0.0074),
-                    NearbyPlaceTemplate("rail_city", "City Town Booking & Rail Inquiry Counter", "Elite Chauraha", 0.0028, 0.0034),
-                    NearbyPlaceTemplate("rail_west", "West Outer Crossing Railway Halt", "West Bypass Road", 0.0052, -0.0138)
+                matchVerifyTerms = listOf(
+                    "railway", "station", "junction", "jn", "halt", "metro", "train", "rail", "cabin", "cantt"
                 )
             ),
             NearbyCategorySpec(
                 canonicalCategory = "Shopping Mall",
-                keywords = listOf("mall", "shopping", "shopping mall", "market", "bazaar", "bazar", "supermarket", "grocery", "mart", "store"),
-                googlePlaceType = "shopping_mall",
-                overpassSelectors = listOf(
-                    """nwr["shop"~"mall|supermarket|department_store"]"""
+                iconType = "SHOPPING",
+                keywords = listOf(
+                    "shopping mall", "mall", "malls", "shopping", "supermarket", "hypermarket",
+                    "department store", "grocery store", "grocery", "mart", "vishal mega mart",
+                    "smart bazaar", "reliance smart"
                 ),
-                fallbackTemplates = listOf(
-                    NearbyPlaceTemplate("shop_city_mall", "City Square Shopping Mall & Multiplex", "Civil Lines Main Avenue", -0.0046, 0.0058),
-                    NearbyPlaceTemplate("shop_smart_bazaar", "Reliance Smart Bazaar & Supermarket", "Elite Commercial Hub", 0.0038, 0.0044),
-                    NearbyPlaceTemplate("shop_vishal", "Vishal Mega Mart Department Store", "Sipri Main Market Road", 0.0054, -0.0082),
-                    NearbyPlaceTemplate("shop_central", "Central Arcade & Retail Plaza", "Sadar Bazaar Crossing", -0.0086, 0.0069),
-                    NearbyPlaceTemplate("shop_metro", "Metro Hypermarket & Daily Needs", "Medical Bypass Road", 0.0092, 0.0112),
-                    NearbyPlaceTemplate("shop_grand", "Grand Galleria Commercial Complex", "Station Road", -0.0068, -0.0051)
+                googlePlaceType = "shopping_mall",
+                photonSearchTerms = listOf("mall", "mart", "supermarket", "shopping", "plaza", "bazaar", "store"),
+                photonOsmTags = listOf("shop:mall", "shop:supermarket", "shop:department_store", "amenity:marketplace"),
+                overpassSelectors = listOf(
+                    """nwr["shop"~"mall|supermarket|department_store"]""",
+                    """nwr["amenity"="marketplace"]"""
+                ),
+                matchVerifyTerms = listOf(
+                    "mall", "mart", "supermarket", "shopping", "plaza", "bazaar", "bazar",
+                    "store", "market", "arcade", "complex", "hypermarket", "retail", "vishal", "reliance"
                 )
             ),
             NearbyCategorySpec(
                 canonicalCategory = "Temple",
-                keywords = listOf("temple", "mandir", "shrine", "dham", "hanuman", "shiv", "ram", "devi", "mosque", "masjid", "church", "gurudwara"),
+                iconType = "TEMPLE",
+                keywords = listOf(
+                    "temple", "temples", "mandir", "shrine", "dham", "hanuman", "shiv",
+                    "ram", "devi", "durga", "ganesh", "balaji", "mosque", "masjid",
+                    "church", "gurudwara", "place of worship"
+                ),
                 googlePlaceType = "hindu_temple",
+                photonSearchTerms = listOf("mandir", "temple", "masjid", "mosque", "church", "gurudwara", "dham", "hanuman", "shiv"),
+                photonOsmTags = listOf("amenity:place_of_worship"),
                 overpassSelectors = listOf(
                     """nwr["amenity"="place_of_worship"]"""
                 ),
-                fallbackTemplates = listOf(
-                    NearbyPlaceTemplate("tmp_ancient", "Shri Siddheshwar Nath Mandir", "Old City Heritage Road", 0.0052, 0.0046),
-                    NearbyPlaceTemplate("tmp_hanuman", "Sankat Mochan Hanuman Dham", "Civil Lines Temple Marg", -0.0054, 0.0062),
-                    NearbyPlaceTemplate("tmp_devi", "Maa Kali & Durga Shakti Peeth", "Fort Hill Approach", 0.0084, 0.0075),
-                    NearbyPlaceTemplate("tmp_ram", "Shri Ram Janaki Mandir Complex", "Sipri Enclave Road", 0.0044, -0.0078),
-                    NearbyPlaceTemplate("tmp_ganesh", "Siddhivinayak Ganesh Mandir", "Sadar Bazar Square", -0.0088, 0.0064),
-                    NearbyPlaceTemplate("tmp_balaji", "Shri Balaji Maharaj Dham", "Highway Bypass Crossing", 0.0132, 0.0096)
+                matchVerifyTerms = listOf(
+                    "temple", "mandir", "shrine", "dham", "hanuman", "shiv", "shiva",
+                    "ram", "devi", "durga", "kali", "ganesh", "balaji", "krishna", "radha",
+                    "mosque", "masjid", "jama", "idgah", "church", "cathedral", "gurudwara", "ashram"
                 )
+            ),
+            NearbyCategorySpec(
+                canonicalCategory = "Gym & Fitness",
+                iconType = "GYM",
+                keywords = listOf("gym", "gyms", "fitness", "fitness center", "workout", "yoga", "stadium"),
+                googlePlaceType = "gym",
+                photonSearchTerms = listOf("gym", "fitness", "stadium", "sports", "yoga"),
+                photonOsmTags = listOf("leisure:fitness_centre", "leisure:sports_centre", "leisure:stadium"),
+                overpassSelectors = listOf(
+                    """nwr["leisure"~"fitness_centre|sports_centre|stadium"]"""
+                ),
+                matchVerifyTerms = listOf("gym", "fitness", "stadium", "sport", "sports", "yoga", "club", "health")
+            ),
+            NearbyCategorySpec(
+                canonicalCategory = "Park & Garden",
+                iconType = "PARK",
+                keywords = listOf("park", "parks", "garden", "gardens", "zoo", "botanical garden", "playground"),
+                googlePlaceType = "park",
+                photonSearchTerms = listOf("park", "garden", "zoo", "playground"),
+                photonOsmTags = listOf("leisure:park", "leisure:garden", "tourism:zoo"),
+                overpassSelectors = listOf(
+                    """nwr["leisure"~"park|garden|playground"]""",
+                    """nwr["tourism"="zoo"]"""
+                ),
+                matchVerifyTerms = listOf("park", "garden", "zoo", "udyan", "vatika", "playground", "green")
+            ),
+            NearbyCategorySpec(
+                canonicalCategory = "Airport",
+                iconType = "AIRPORT",
+                keywords = listOf("airport", "airports", "aerodrome", "airstrip", "helipad"),
+                googlePlaceType = "airport",
+                photonSearchTerms = listOf("airport", "aerodrome", "airstrip", "helipad"),
+                photonOsmTags = listOf("aeroway:aerodrome", "aeroway:helipad"),
+                overpassSelectors = listOf(
+                    """nwr["aeroway"~"aerodrome|helipad"]"""
+                ),
+                matchVerifyTerms = listOf("airport", "aerodrome", "airstrip", "helipad", "aviation", "air")
+            ),
+            NearbyCategorySpec(
+                canonicalCategory = "Post Office",
+                iconType = "POST_OFFICE",
+                keywords = listOf("post office", "india post", "dak ghar", "speed post"),
+                googlePlaceType = "post_office",
+                photonSearchTerms = listOf("post office", "post", "dak"),
+                photonOsmTags = listOf("amenity:post_office"),
+                overpassSelectors = listOf(
+                    """nwr["amenity"="post_office"]"""
+                ),
+                matchVerifyTerms = listOf("post", "dak", "office", "mail", "courier")
             )
         )
 
@@ -601,6 +656,62 @@ class DestinationRepositoryImpl(
             val clean = raw.trim().lowercase(Locale.US)
             if (clean.length < 3) return false
             return knownNamedLocations.containsKey(clean)
+        }
+
+        private fun levenshteinDistance(a: String, b: String): Int {
+            if (a == b) return 0
+            if (a.isEmpty()) return b.length
+            if (b.isEmpty()) return a.length
+            val dp = IntArray(b.length + 1) { it }
+            for (i in 1..a.length) {
+                var prev = dp[0]
+                dp[0] = i
+                for (j in 1..b.length) {
+                    val temp = dp[j]
+                    val cost = if (a[i - 1] == b[j - 1]) 0 else 1
+                    dp[j] = minOf(dp[j] + 1, dp[j - 1] + 1, prev + cost)
+                    prev = temp
+                }
+            }
+            return dp[b.length]
+        }
+
+        fun matchCategoryByFuzzyOrExact(rawKeyword: String): NearbyCategorySpec? {
+            val clean = rawKeyword.trim().lowercase(Locale.US)
+            if (clean.isEmpty()) return null
+
+            // 1. Direct exact match on canonicalCategory or keywords
+            nearbyCategorySpecs.firstOrNull { spec ->
+                spec.canonicalCategory.equals(clean, ignoreCase = true) ||
+                    spec.keywords.any { kw -> clean == kw }
+            }?.let { return it }
+
+            // 2. Word-boundary or phrase containment match on keywords
+            nearbyCategorySpecs.firstOrNull { spec ->
+                spec.keywords.any { kw ->
+                    kw.length >= 3 && (
+                        clean.contains(Regex("\\b${Regex.escape(kw)}\\b")) ||
+                            (kw.contains(" ") && clean.contains(kw))
+                        )
+                }
+            }?.let { return it }
+
+            // 3. Typo-tolerant fuzzy match for single/short category words (e.g. "hospotal", "hosptal", "resturant", "scool")
+            if (clean.length >= 5 && !clean.contains(" ")) {
+                for (spec in nearbyCategorySpecs) {
+                    val mainTargets = listOf(spec.canonicalCategory.lowercase(Locale.US)) +
+                        spec.keywords.filter { !it.contains(" ") && it.length >= 5 }
+                    for (target in mainTargets) {
+                        val maxDist = if (target.length >= 7) 2 else 1
+                        if (abs(clean.length - target.length) <= maxDist &&
+                            levenshteinDistance(clean, target) <= maxDist
+                        ) {
+                            return spec
+                        }
+                    }
+                }
+            }
+            return null
         }
     }
 
@@ -621,7 +732,6 @@ class DestinationRepositoryImpl(
         }
         return sourceFlow.onStart {
             if (!seedPrefs.getBoolean("cleaned_global_demo_destinations_v4", false)) {
-                // Remove legacy un-scoped sample destinations that were not associated with a specific user ID
                 dao.clearAllDestinations()
                 seedPrefs.edit().putBoolean("cleaned_global_demo_destinations_v4", true).apply()
             }
@@ -657,12 +767,12 @@ class DestinationRepositoryImpl(
     }
 
     override suspend fun restoreDefaultRecentDestinations() {
-        // No-op: never inject fake/default destinations; only show destinations visited by the logged-in user
+        // No-op: never inject dummy destinations; only show destinations visited by the logged-in user
     }
 
     /**
-     * Resolves a human-entered location query (e.g., "Civil Lines", "Kanpur", "Sipri", "Delhi")
-     * into actual geographic coordinates so nearby searches can center around any specified location.
+     * Resolves a human-entered location query (e.g., "Banda", "Atarra", "Civil Lines", "Kanpur", "Delhi")
+     * into actual geographic coordinates using known table + Android Geocoder + Photon + Nominatim.
      */
     override suspend fun resolveLocationCenter(
         locationQuery: String,
@@ -677,19 +787,25 @@ class DestinationRepositoryImpl(
             return@withContext currentLocation
         }
 
-        // 1. Check known local/city lookup table
         val lower = clean.lowercase(Locale.US)
-        knownNamedLocations[lower]?.let { return@withContext it }
-        knownNamedLocations.entries.firstOrNull { (k, _) ->
-            lower.contains(k) || k.contains(lower)
-        }?.value?.let { return@withContext it }
+        locationCenterCache[lower]?.let { return@withContext it }
 
-        // 2. Check local gazetteer
-        realWorldGazetteer.firstOrNull {
-            it.name.contains(clean, ignoreCase = true) ||
-                it.address.contains(clean, ignoreCase = true)
-        }?.let {
-            return@withContext LocationPoint(it.latitude, it.longitude)
+        // 1. Exact or token match in knownNamedLocations
+        knownNamedLocations[lower]?.let {
+            locationCenterCache[lower] = it
+            return@withContext it
+        }
+        knownNamedLocations.entries.firstOrNull { (k, _) ->
+            lower == k || lower.split(" ", ",").any { token -> token.trim() == k }
+        }?.value?.let {
+            locationCenterCache[lower] = it
+            return@withContext it
+        }
+
+        // 2. Try Photon / Nominatim real geocoding
+        fetchGeocodePointFromOsm(clean, currentLocation)?.let {
+            locationCenterCache[lower] = it
+            return@withContext it
         }
 
         // 3. Try Android platform Geocoder
@@ -700,14 +816,15 @@ class DestinationRepositoryImpl(
                 val addresses = geocoder.getFromLocationName(clean, 1)
                 val first = addresses?.firstOrNull()
                 if (first != null && first.hasLatitude() && first.hasLongitude()) {
-                    return@withContext LocationPoint(first.latitude, first.longitude)
+                    val pt = LocationPoint(first.latitude, first.longitude)
+                    locationCenterCache[lower] = pt
+                    return@withContext pt
                 }
             }
         } catch (_: Exception) {
         }
 
-        // 4. Try Nominatim / Photon geocoding
-        fetchGeocodePointFromOsm(clean, currentLocation) ?: currentLocation
+        currentLocation
     }
 
     fun getFastSearchCenter(
@@ -719,9 +836,10 @@ class DestinationRepositoryImpl(
         if (trimmed.isEmpty()) return userOrigin
         val intent = parseSearchIntent(trimmed, "")
         val locCandidate = intent.explicitLocationName?.lowercase(Locale.US) ?: trimmed.lowercase(Locale.US)
+        locationCenterCache[locCandidate]?.let { return it }
         knownNamedLocations[locCandidate]?.let { return it }
         knownNamedLocations.entries.firstOrNull { (k, _) ->
-            locCandidate == k || (intent.explicitLocationName != null && (locCandidate.contains(k) || k.contains(locCandidate)))
+            locCandidate == k || locCandidate.split(" ", ",").any { it.trim() == k }
         }?.value?.let { return it }
         return userOrigin
     }
@@ -735,16 +853,21 @@ class DestinationRepositoryImpl(
         if (trimmed.isEmpty()) return userOrigin
         val intent = parseSearchIntent(trimmed, "")
         if (!intent.explicitLocationName.isNullOrBlank()) {
-            return withTimeoutOrNull(800L) {
+            return withTimeoutOrNull(1200L) {
                 resolveLocationCenter(intent.explicitLocationName, userOrigin)
+            } ?: getFastSearchCenter(query, userOrigin)
+        }
+        if (!intent.isCategorySearch) {
+            return withTimeoutOrNull(1200L) {
+                resolveLocationCenter(trimmed, userOrigin)
             } ?: getFastSearchCenter(query, userOrigin)
         }
         return getFastSearchCenter(query, userOrigin)
     }
 
     /**
-     * Zero-latency (< 2ms) synchronous local & category autocomplete suggestions so the user sees
-     * instant results on every keystroke without waiting on network I/O.
+     * Zero-latency (< 2ms) synchronous suggestions from real cache or real known locations.
+     * Never generates synthetic/dummy offset coordinates.
      */
     fun getInstantPlaceSuggestions(
         query: String,
@@ -753,113 +876,58 @@ class DestinationRepositoryImpl(
         val trimmed = query.trim()
         if (trimmed.isEmpty()) return emptyList()
         val userOrigin = currentLocation ?: LocationPoint(25.4484, 78.5685)
-        val cacheKey = "${trimmed.lowercase(Locale.US)}_${String.format(Locale.US, "%.2f_%.2f", userOrigin.latitude, userOrigin.longitude)}"
+        val cacheKey = "${trimmed.lowercase(Locale.US)}__${String.format(Locale.US, "%.2f_%.2f", userOrigin.latitude, userOrigin.longitude)}"
         searchCache[cacheKey]?.let { if (it.isNotEmpty()) return it }
 
         val intent = parseSearchIntent(trimmed, "")
-        val lower = trimmed.lowercase(Locale.US)
-
-        // Check if explicit location is in our fast lookup table
-        val fastCenter = intent.explicitLocationName?.lowercase(Locale.US)?.let { locName ->
-            knownNamedLocations[locName]
-                ?: knownNamedLocations.entries.firstOrNull { (k, _) -> locName.contains(k) || k.contains(locName) }?.value
-        } ?: userOrigin
-
-        // Also match partial category prefixes (e.g. "hos", "sch", "ser", "pet", "res", "atm", "col")
-        val prefixMatchedCategory = intent.categorySpec ?: nearbyCategorySpecs.firstOrNull { spec ->
-            spec.canonicalCategory.lowercase(Locale.US).startsWith(lower) ||
-                spec.keywords.any { kw -> kw.startsWith(lower) || lower.startsWith(kw) }
+        if (intent.isCategorySearch) {
+            // For category searches, never return fake templates; let live search populate real OSM/Places data
+            return emptyList()
         }
 
+        val lower = trimmed.lowercase(Locale.US)
         val results = mutableListOf<Destination>()
 
-        if (prefixMatchedCategory != null) {
-            return deduplicatePlaces(
-                buildCategoryPlacesAroundCenter(
-                    spec = prefixMatchedCategory,
-                    searchCenter = fastCenter,
-                    userOrigin = userOrigin,
-                    locationLabel = intent.explicitLocationName
+        // Exact or prefix match on real verified cities / towns when searching for a location
+        knownNamedLocations.entries
+            .filter { (k, _) -> k == lower || k.startsWith(lower) }
+            .sortedBy { (k, _) -> if (k == lower) 0 else k.length }
+            .take(5)
+            .forEach { (name, pt) ->
+                val title = name.split(" ").joinToString(" ") { w -> w.replaceFirstChar { it.uppercase() } }
+                val distKm = GeoUtils.haversineMeters(userOrigin.latitude, userOrigin.longitude, pt.latitude, pt.longitude) / 1000.0
+                results.add(
+                    Destination(
+                        id = "real_loc_${name.replace(" ", "_")}",
+                        name = title,
+                        address = "$title, India",
+                        category = "Location",
+                        latitude = pt.latitude,
+                        longitude = pt.longitude,
+                        distanceFromUserKm = distKm,
+                        isDemoSample = false
+                    )
                 )
-            ).take(15)
-        }
+            }
 
-        if (!intent.explicitLocationName.isNullOrBlank()) {
-            return deduplicatePlaces(
-                buildGenericPlacesAroundCenter(
-                    keyword = intent.cleanQueryKeyword.ifBlank { trimmed },
-                    searchCenter = fastCenter,
-                    userOrigin = userOrigin,
-                    locationLabel = intent.explicitLocationName
-                )
-            ).take(15)
-        }
-
-        // Match known cities / areas when searching for a city/locality directly
-        knownNamedLocations.entries.filter { (k, _) ->
-            k.contains(lower) || lower.contains(k)
-        }.take(4).forEach { (name, pt) ->
-            val title = name.split(" ").joinToString(" ") { w -> w.replaceFirstChar { it.uppercase() } }
-            val distKm = GeoUtils.haversineMeters(userOrigin.latitude, userOrigin.longitude, pt.latitude, pt.longitude) / 1000.0
-            results.add(
-                Destination(
-                    id = "city_${name.replace(" ", "_")}",
-                    name = title,
-                    address = "$title Main City Center",
-                    category = "City / Locality",
-                    latitude = pt.latitude,
-                    longitude = pt.longitude,
-                    distanceFromUserKm = distKm,
-                    isDemoSample = false
-                )
-            )
-        }
-
-        // Match local gazetteer only if within 25 km of fastCenter
-        val gazetteerMatches = realWorldGazetteer.filter {
-            val matchesText = it.name.contains(intent.cleanQueryKeyword, ignoreCase = true) ||
-                it.address.contains(intent.cleanQueryKeyword, ignoreCase = true) ||
-                it.category.contains(intent.cleanQueryKeyword, ignoreCase = true) ||
-                it.name.contains(trimmed, ignoreCase = true)
-            val nearCenter = GeoUtils.haversineMeters(
-                fastCenter.latitude,
-                fastCenter.longitude,
-                it.latitude,
-                it.longitude
-            ) <= 25_000.0
-            matchesText && nearCenter
-        }.map { dest ->
-            val distKm = GeoUtils.haversineMeters(
-                userOrigin.latitude,
-                userOrigin.longitude,
-                dest.latitude,
-                dest.longitude
-            ) / 1000.0
-            dest.copy(distanceFromUserKm = distKm)
-        }
-        results.addAll(gazetteerMatches)
-
-        if (results.size < 6) {
-            results.addAll(
-                buildGenericPlacesAroundCenter(
-                    keyword = intent.cleanQueryKeyword.ifBlank { trimmed },
-                    searchCenter = fastCenter,
-                    userOrigin = userOrigin,
-                    locationLabel = intent.explicitLocationName
-                )
-            )
-        }
-
-        return deduplicatePlaces(results).take(15)
+        return deduplicatePlaces(results)
     }
 
     /**
-     * Searches for all relevant real places around either:
-     * - the user's detected `currentLocation`, OR
-     * - a specified location (via `targetLocationQuery` or natural language like "Hospital in Kanpur",
-     *   "Petrol Pump near Civil Lines", "School Jhansi", etc.).
+     * Searches for 100% REAL places using OpenStreetMap (Photon + Nominatim + Overpass),
+     * Google Places API, and Android Geocoder:
      *
-     * Runs online providers in PARALLEL with a 1100ms timeout so autocomplete and search complete in < 1 second.
+     * 1. If `intent.isCategorySearch == true` (e.g. "hospital", "hospital in banda", "petrol pump",
+     *    "school in jhansi", "atm", etc.):
+     *    - Fetches ALL real places of that category (either in the specified location or across
+     *      local + regional + India/world scales when no location is specified) so every real place
+     *      gets a Red Marker with the category's icon on the map.
+     *
+     * 2. If `intent.isCategorySearch == false` (e.g. "Banda", "Atarra", "Jhansi", "Kanpur",
+     *    "Taj Mahal", "Sipri Bazaar" — single location/place search):
+     *    - Geocodes the real place without artificial distance cutoffs and without generating
+     *      any dummy/offset places, so the map moves directly to that place and marks ONLY that
+     *      place at its exact real coordinates.
      */
     override suspend fun searchPlaces(
         query: String,
@@ -880,17 +948,8 @@ class DestinationRepositoryImpl(
             }
         }
 
-        val effectiveQuery = trimmed.ifEmpty { "Place" }
+        val effectiveQuery = trimmed.ifEmpty { targetLocationQuery.trim() }
         val intent = parseSearchIntent(effectiveQuery, targetLocationQuery)
-
-        // Resolve searchCenter with a fast 800ms bound so geocoding never stalls
-        val searchCenter: LocationPoint = if (!intent.explicitLocationName.isNullOrBlank()) {
-            kotlinx.coroutines.withTimeoutOrNull(800L) {
-                resolveLocationCenter(intent.explicitLocationName, userOrigin)
-            } ?: userOrigin
-        } else {
-            userOrigin
-        }
 
         val placesKey = BuildConfig.PLACES_API_KEY.ifBlank { BuildConfig.MAPS_API_KEY }
         val hasValidGoogleKey = placesKey.isNotBlank() &&
@@ -898,134 +957,310 @@ class DestinationRepositoryImpl(
             placesKey != "MY_PLACES_API_KEY" &&
             placesKey != "DEFAULT_API_KEY"
 
-        // Execute online providers IN PARALLEL with a strict 1200ms ceiling
-        val parallelOnlinePlaces: List<Destination> = withTimeoutOrNull(1200L) {
+        if (intent.isCategorySearch) {
+            // =========================================================================
+            // CASE 1: CATEGORY SEARCH ("hospital", "hospital in banda", "petrol pump", etc.)
+            // =========================================================================
+            val hasExplicitLocation = !intent.explicitLocationName.isNullOrBlank()
+            val searchCenter: LocationPoint = if (hasExplicitLocation) {
+                withTimeoutOrNull(1400L) {
+                    resolveLocationCenter(intent.explicitLocationName!!, userOrigin)
+                } ?: userOrigin
+            } else {
+                userOrigin
+            }
+
+            val allCategoryPlaces = withTimeoutOrNull(2800L) {
+                coroutineScope {
+                    val jobs = mutableListOf<kotlinx.coroutines.Deferred<List<Destination>>>()
+
+                    if (hasExplicitLocation) {
+                        // Category in a specific location (e.g. "hospital in banda", "petrol pump in jhansi")
+                        // Use a ~38 km bounding box around the resolved location center
+                        val localDelta = 0.36
+                        val minLon = searchCenter.longitude - localDelta
+                        val minLat = searchCenter.latitude - localDelta
+                        val maxLon = searchCenter.longitude + localDelta
+                        val maxLat = searchCenter.latitude + localDelta
+
+                        jobs += async {
+                            fetchPhotonCategoryInBBox(
+                                intent = intent,
+                                minLon = minLon,
+                                minLat = minLat,
+                                maxLon = maxLon,
+                                maxLat = maxLat,
+                                userOrigin = userOrigin,
+                                maxPerTerm = 28
+                            )
+                        }
+                        jobs += async {
+                            fetchNominatimCategoryPlaces(
+                                intent = intent,
+                                searchCenter = searchCenter,
+                                delta = localDelta,
+                                userOrigin = userOrigin
+                            )
+                        }
+                        jobs += async {
+                            fetchOverpassNearbyPlaces(
+                                intent = intent,
+                                searchCenter = searchCenter,
+                                radiusMeters = 28000,
+                                userOrigin = userOrigin
+                            )
+                        }
+                        if (hasValidGoogleKey) {
+                            jobs += async {
+                                fetchGooglePlacesSearch(intent, searchCenter, userOrigin, placesKey)
+                            }
+                        }
+                        jobs += async {
+                            fetchAndroidGeocoderPlaces(
+                                query = "${intent.cleanQueryKeyword} in ${intent.explicitLocationName}",
+                                searchCenter = searchCenter,
+                                delta = localDelta,
+                                userOrigin = userOrigin,
+                                categoryLabel = intent.categorySpec?.canonicalCategory
+                            )
+                        }
+                    } else {
+                        // Category ONLY search (e.g. "hospital", "petrol pump", "school")
+                        // Query across 3 scales in parallel so local, regional (nearby cities like Banda,
+                        // Kanpur, Jhansi, Lucknow, etc.), and pan-India/world map all have real red markers!
+                        val localDelta = 0.38
+                        val regionalDelta = 2.4
+
+                        // Scale A: Local District BBox (~40 km)
+                        jobs += async {
+                            fetchPhotonCategoryInBBox(
+                                intent = intent,
+                                minLon = searchCenter.longitude - localDelta,
+                                minLat = searchCenter.latitude - localDelta,
+                                maxLon = searchCenter.longitude + localDelta,
+                                maxLat = searchCenter.latitude + localDelta,
+                                userOrigin = userOrigin,
+                                maxPerTerm = 25
+                            )
+                        }
+                        // Scale B: Regional Multi-City BBox (~250 km covering Jhansi, Banda, Kanpur, Gwalior, Prayagraj, etc.)
+                        jobs += async {
+                            fetchPhotonCategoryInBBox(
+                                intent = intent,
+                                minLon = searchCenter.longitude - regionalDelta,
+                                minLat = searchCenter.latitude - regionalDelta,
+                                maxLon = searchCenter.longitude + regionalDelta,
+                                maxLat = searchCenter.latitude + regionalDelta,
+                                userOrigin = userOrigin,
+                                maxPerTerm = 30
+                            )
+                        }
+                        // Scale C: Pan-India / World Map Scale
+                        jobs += async {
+                            fetchPhotonCategoryInBBox(
+                                intent = intent,
+                                minLon = 68.0,
+                                minLat = 8.0,
+                                maxLon = 97.5,
+                                maxLat = 35.5,
+                                userOrigin = userOrigin,
+                                maxPerTerm = 25
+                            )
+                        }
+                        jobs += async {
+                            fetchNominatimCategoryPlaces(
+                                intent = intent,
+                                searchCenter = searchCenter,
+                                delta = localDelta,
+                                userOrigin = userOrigin
+                            )
+                        }
+                        jobs += async {
+                            fetchOverpassNearbyPlaces(
+                                intent = intent,
+                                searchCenter = searchCenter,
+                                radiusMeters = 25000,
+                                userOrigin = userOrigin
+                            )
+                        }
+                        if (hasValidGoogleKey) {
+                            jobs += async {
+                                fetchGooglePlacesSearch(intent, searchCenter, userOrigin, placesKey)
+                            }
+                        }
+                    }
+
+                    jobs.awaitAll().flatten()
+                }
+            }.orEmpty()
+
+            val verified = allCategoryPlaces.filter { place ->
+                isValidCategoryResult(place, intent) && (
+                    !hasExplicitLocation ||
+                        GeoUtils.haversineMeters(
+                            searchCenter.latitude,
+                            searchCenter.longitude,
+                            place.latitude,
+                            place.longitude
+                        ) <= 55_000.0
+                    )
+            }
+
+            val deduplicated = deduplicatePlaces(verified)
+                .sortedBy { place ->
+                    GeoUtils.haversineMeters(
+                        searchCenter.latitude,
+                        searchCenter.longitude,
+                        place.latitude,
+                        place.longitude
+                    )
+                }
+                .take(if (hasExplicitLocation) 45 else 85)
+
+            if (deduplicated.isNotEmpty()) {
+                searchCache[cacheKey] = deduplicated
+            }
+            return@withContext Result.success(deduplicated)
+        } else {
+            // =========================================================================
+            // CASE 2: SINGLE LOCATION / SPECIFIC PLACE SEARCH ("Banda", "Atarra", "Taj Mahal", etc.)
+            // Zero dummy offsets. Resolves actual location coordinates from real geocoding.
+            // =========================================================================
+            val exactKnown = knownNamedLocations[trimmed.lowercase(Locale.US)]
+            val onlineLocations = withTimeoutOrNull(2200L) {
+                coroutineScope {
+                    val photonDeferred = async {
+                        fetchPhotonLocationPlaces(trimmed, userOrigin)
+                    }
+                    val nominatimDeferred = async {
+                        fetchNominatimLocationPlaces(trimmed, userOrigin)
+                    }
+                    val googleDeferred = async {
+                        if (hasValidGoogleKey) {
+                            fetchGooglePlacesSearch(intent, userOrigin, userOrigin, placesKey)
+                        } else {
+                            emptyList()
+                        }
+                    }
+                    val geocoderDeferred = async {
+                        fetchAndroidGeocoderLocationPlaces(trimmed, userOrigin)
+                    }
+                    buildList {
+                        addAll(photonDeferred.await())
+                        addAll(nominatimDeferred.await())
+                        addAll(googleDeferred.await())
+                        addAll(geocoderDeferred.await())
+                    }
+                }
+            }.orEmpty()
+
+            val combined = buildList {
+                if (exactKnown != null) {
+                    val title = trimmed.split(" ").joinToString(" ") { w -> w.replaceFirstChar { it.uppercase() } }
+                    val distKm = GeoUtils.haversineMeters(
+                        userOrigin.latitude,
+                        userOrigin.longitude,
+                        exactKnown.latitude,
+                        exactKnown.longitude
+                    ) / 1000.0
+                    // Check if online results have a fuller address for this exact coordinate
+                    val matchingOnline = onlineLocations.firstOrNull {
+                        GeoUtils.haversineMeters(exactKnown.latitude, exactKnown.longitude, it.latitude, it.longitude) <= 15_000.0
+                    }
+                    add(
+                        Destination(
+                            id = "known_loc_${trimmed.lowercase(Locale.US).replace(" ", "_")}",
+                            name = title,
+                            address = matchingOnline?.address?.ifBlank { "$title, India" } ?: "$title, India",
+                            category = "Location",
+                            latitude = exactKnown.latitude,
+                            longitude = exactKnown.longitude,
+                            distanceFromUserKm = distKm,
+                            isDemoSample = false
+                        )
+                    )
+                }
+                addAll(onlineLocations)
+            }
+
+            val lowerQuery = trimmed.lowercase(Locale.US)
+            val ranked = deduplicatePlaces(combined).sortedWith(
+                compareBy<Destination> { place ->
+                    val lowerName = place.name.lowercase(Locale.US)
+                    when {
+                        lowerName == lowerQuery -> 0
+                        lowerName.startsWith(lowerQuery) -> 1
+                        lowerName.contains(lowerQuery) -> 2
+                        else -> 3
+                    }
+                }.thenBy { place ->
+                    if (place.address.contains("India", ignoreCase = true)) 0 else 1
+                }.thenBy { place ->
+                    place.distanceFromUserKm ?: Double.MAX_VALUE
+                }
+            ).take(10)
+
+            if (ranked.isNotEmpty()) {
+                searchCache[cacheKey] = ranked
+            }
+            return@withContext Result.success(ranked)
+        }
+    }
+
+    /**
+     * Dynamically fetches real places for an active category search inside the currently visible
+     * Google Map viewport (`minLat..maxLat`, `minLng..maxLng`) when the user pans or zooms anywhere
+     * on the world map.
+     */
+    suspend fun searchCategoryPlacesInViewport(
+        query: String,
+        center: LocationPoint,
+        minLat: Double,
+        minLng: Double,
+        maxLat: Double,
+        maxLng: Double,
+        userOrigin: LocationPoint
+    ): List<Destination> = withContext(Dispatchers.IO) {
+        val intent = parseSearchIntent(query.trim(), "")
+        if (!intent.isCategorySearch) return@withContext emptyList()
+
+        val safeMinLon = min(minLng, maxLng).coerceIn(-180.0, 180.0)
+        val safeMaxLon = max(minLng, maxLng).coerceIn(-180.0, 180.0)
+        val safeMinLat = min(minLat, maxLat).coerceIn(-85.0, 85.0)
+        val safeMaxLat = max(minLat, maxLat).coerceIn(-85.0, 85.0)
+
+        val fetched = withTimeoutOrNull(2200L) {
             coroutineScope {
-                val googleDeferred = async {
-                    if (hasValidGoogleKey) {
-                        fetchGooglePlacesSearch(intent, searchCenter, userOrigin, placesKey)
-                    } else {
-                        emptyList()
-                    }
-                }
-                val overpassDeferred = async {
-                    if (intent.categorySpec != null) {
-                        fetchOverpassNearbyPlaces(intent, searchCenter, userOrigin)
-                    } else {
-                        emptyList()
-                    }
-                }
                 val photonDeferred = async {
-                    fetchPhotonOrNominatimPlaces(
-                        query = intent.cleanQueryKeyword,
-                        searchCenter = searchCenter,
+                    fetchPhotonCategoryInBBox(
+                        intent = intent,
+                        minLon = safeMinLon,
+                        minLat = safeMinLat,
+                        maxLon = safeMaxLon,
+                        maxLat = safeMaxLat,
                         userOrigin = userOrigin,
-                        categoryLabel = intent.categorySpec?.canonicalCategory
+                        maxPerTerm = 25
                     )
                 }
                 val nominatimDeferred = async {
-                    fetchNominatimBoundedPlaces(
+                    fetchNominatimCategoryInBBox(
                         intent = intent,
-                        searchCenter = searchCenter,
+                        minLon = safeMinLon,
+                        minLat = safeMinLat,
+                        maxLon = safeMaxLon,
+                        maxLat = safeMaxLat,
                         userOrigin = userOrigin
                     )
                 }
-                val geocoderDeferred = async {
-                    val geocoderQuery = if (!intent.explicitLocationName.isNullOrBlank()) {
-                        "${intent.cleanQueryKeyword}, ${intent.explicitLocationName}"
-                    } else {
-                        intent.cleanQueryKeyword
-                    }
-                    fetchAndroidGeocoderPlaces(
-                        query = geocoderQuery,
-                        searchCenter = searchCenter,
-                        userOrigin = userOrigin
-                    )
-                }
-
-                buildList {
-                    addAll(googleDeferred.await())
-                    addAll(overpassDeferred.await())
-                    addAll(photonDeferred.await())
-                    addAll(nominatimDeferred.await())
-                    addAll(geocoderDeferred.await())
-                }
+                photonDeferred.await() + nominatimDeferred.await()
             }
         }.orEmpty()
 
-        // Keep online places tightly bounded around searchCenter (<= 18 km) when searching a category or explicit location
-        val boundedOnline = parallelOnlinePlaces.filter { place ->
-            val distFromCenterMeters = GeoUtils.haversineMeters(
-                searchCenter.latitude,
-                searchCenter.longitude,
-                place.latitude,
-                place.longitude
-            )
-            if (intent.categorySpec != null || !intent.explicitLocationName.isNullOrBlank()) {
-                distFromCenterMeters <= 18_000.0
-            } else {
-                distFromCenterMeters <= 45_000.0
-            }
-        }
-
-        val deduplicatedOnline = deduplicatePlaces(boundedOnline)
-        val finalPlaces = if (intent.categorySpec != null) {
-            val categoryFallbacks = buildCategoryPlacesAroundCenter(
-                spec = intent.categorySpec,
-                searchCenter = searchCenter,
-                userOrigin = userOrigin,
-                locationLabel = intent.explicitLocationName
-            )
-            deduplicatePlaces(deduplicatedOnline + categoryFallbacks)
-        } else {
-            val gazetteerMatches = realWorldGazetteer.filter {
-                val matchesText = it.name.contains(intent.cleanQueryKeyword, ignoreCase = true) ||
-                    it.address.contains(intent.cleanQueryKeyword, ignoreCase = true) ||
-                    it.category.contains(intent.cleanQueryKeyword, ignoreCase = true)
-                val nearCenter = GeoUtils.haversineMeters(
-                    searchCenter.latitude,
-                    searchCenter.longitude,
-                    it.latitude,
-                    it.longitude
-                ) <= 20_000.0
-                matchesText && nearCenter
-            }.map { dest ->
-                val distKm = GeoUtils.haversineMeters(
-                    userOrigin.latitude,
-                    userOrigin.longitude,
-                    dest.latitude,
-                    dest.longitude
-                ) / 1000.0
-                dest.copy(distanceFromUserKm = distKm)
-            }
-            val combined = deduplicatePlaces(deduplicatedOnline + gazetteerMatches)
-            if (combined.size >= 8) {
-                combined
-            } else {
-                val generatedAroundCenter = buildGenericPlacesAroundCenter(
-                    keyword = intent.cleanQueryKeyword,
-                    searchCenter = searchCenter,
-                    userOrigin = userOrigin,
-                    locationLabel = intent.explicitLocationName
-                )
-                deduplicatePlaces(combined + generatedAroundCenter)
-            }
-        }
-
-        val sorted = finalPlaces.sortedBy { place ->
-            GeoUtils.haversineMeters(
-                searchCenter.latitude,
-                searchCenter.longitude,
-                place.latitude,
-                place.longitude
-            )
-        }.take(20)
-
-        if (sorted.isNotEmpty()) {
-            searchCache[cacheKey] = sorted
-        }
-
-        Result.success(sorted)
+        deduplicatePlaces(
+            fetched.filter { isValidCategoryResult(it, intent) }
+        ).sortedBy { place ->
+            GeoUtils.haversineMeters(center.latitude, center.longitude, place.latitude, place.longitude)
+        }.take(50)
     }
 
     override suspend fun reverseGeocode(point: LocationPoint): Destination = withContext(Dispatchers.IO) {
@@ -1038,7 +1273,7 @@ class DestinationRepositoryImpl(
                 if (first != null) {
                     return@withContext Destination(
                         id = "map_pin_${point.latitude}_${point.longitude}",
-                        name = first.featureName ?: first.subLocality ?: "Selected Map Location",
+                        name = first.featureName ?: first.subLocality ?: first.locality ?: "Selected Map Location",
                         address = first.getAddressLine(0)
                             ?: String.format(Locale.US, "%.4f, %.4f", point.latitude, point.longitude),
                         category = "Map Pin",
@@ -1050,7 +1285,6 @@ class DestinationRepositoryImpl(
                 }
             }
         } catch (_: Exception) {
-            // Fall through to coordinate destination
         }
 
         Destination(
@@ -1066,11 +1300,10 @@ class DestinationRepositoryImpl(
     }
 
     /**
-     * Parses a user search query (plus optional explicit `targetLocationQuery`) into:
-     * - `categorySpec` (if the query matches "Service Centre", "School", "Hospital", "Petrol Pump", "Restaurant", etc.)
-     * - `cleanQueryKeyword` (the place or category keyword)
-     * - `explicitLocationName` (if the user specified a location, e.g., "Hospital in Kanpur",
-     *   "Petrol Pump near Civil Lines", "School Jhansi", or entered a location in the location field).
+     * Accurately distinguishes:
+     * - Category Search (only category like "hospital", "hospotal", "petrol pump", "school", OR
+     *   category with location like "hospital in banda", "petrol pump near jhansi", "banda hospital")
+     * - Single Location Search ("Banda", "Atarra", "Jhansi", "Kanpur", "Sipri Bazaar", "Taj Mahal")
      */
     fun parseSearchIntent(rawQuery: String, targetLocationQuery: String = ""): ParsedSearchIntent {
         val explicitTarget = targetLocationQuery.trim().takeIf {
@@ -1081,18 +1314,34 @@ class DestinationRepositoryImpl(
         }
 
         val normalized = rawQuery.trim()
+        val lowerNormalized = normalized.lowercase(Locale.US)
+
+        // 1. If the entire query (with no targetLocationQuery) is a known city/town/locality name
+        // (e.g., "Banda", "Atarra", "Jhansi", "Sipri Bazaar", "Sadar Bazar", "Medical Road"),
+        // it is ALWAYS a Single Location Search, never a category search!
+        if (explicitTarget == null && knownNamedLocations.containsKey(lowerNormalized)) {
+            return ParsedSearchIntent(
+                categorySpec = null,
+                cleanQueryKeyword = normalized,
+                explicitLocationName = null,
+                isCategorySearch = false
+            )
+        }
+
         var extractedKeyword = normalized
         var extractedLocation: String? = explicitTarget
+        var hadExplicitConnector = explicitTarget != null
 
-        // Check for natural language location connectors: " in ", " near ", " around ", " at ", " nearby "
-        val connectors = listOf(" near ", " in ", " around ", " at ", " nearby ")
+        // 2. Check for natural language location connectors: " in ", " near ", " around ", " at ", " nearby ", " mein "
+        val connectors = listOf(" near ", " in ", " around ", " at ", " nearby ", " mein ", " ke pass ", " ke paas ")
         for (conn in connectors) {
-            val idx = normalized.lowercase(Locale.US).indexOf(conn)
+            val idx = lowerNormalized.indexOf(conn)
             if (idx > 0) {
                 val leftPart = normalized.substring(0, idx).trim()
                 val rightPart = normalized.substring(idx + conn.length).trim()
                 if (leftPart.isNotEmpty() && rightPart.isNotEmpty()) {
                     extractedKeyword = leftPart
+                    hadExplicitConnector = true
                     if (extractedLocation == null &&
                         !rightPart.equals("me", ignoreCase = true) &&
                         !rightPart.equals("my location", ignoreCase = true) &&
@@ -1105,81 +1354,430 @@ class DestinationRepositoryImpl(
             }
         }
 
-        // Also check comma or hyphen separated "<Category>, <Location>"
-        if (extractedLocation == null && (extractedKeyword.contains(",") || extractedKeyword.contains(" - "))) {
-            val delimiter = if (extractedKeyword.contains(",")) "," else " - "
-            val parts = extractedKeyword.split(delimiter, limit = 2).map { it.trim() }
-            if (parts.size == 2 && parts[0].isNotEmpty() && parts[1].isNotEmpty()) {
-                extractedKeyword = parts[0]
-                extractedLocation = parts[1]
-            }
-        }
+        // 3. Match category specification (including typo-tolerant matching like "hospotal")
+        var matchedSpec: NearbyCategorySpec? = matchCategoryByFuzzyOrExact(extractedKeyword)
 
-        // Match category specification
-        val lowerKeyword = extractedKeyword.lowercase(Locale.US)
-        var matchedSpec: NearbyCategorySpec? = nearbyCategorySpecs.firstOrNull { spec ->
-            spec.canonicalCategory.equals(extractedKeyword, ignoreCase = true) ||
-                spec.keywords.any { kw -> lowerKeyword == kw || lowerKeyword.contains(kw) }
-        }
-
-        // If the user typed "<Category> <Location>" or "<Location> <Category>" without "in/near"
-        // (e.g., "Hospital Kanpur", "Kanpur Hospital", "Petrol Pump Atarra", "Atarra Petrol Pump", "Service Centre Jhansi")
+        // 4. Check "<Category> <Location>" or "<Location> <Category>" without "in/near"
+        // (e.g., "hospital banda", "banda hospital", "petrol pump jhansi", "jhansi school")
         if (extractedLocation == null && matchedSpec != null) {
+            val lowerKw = extractedKeyword.lowercase(Locale.US)
             val allCandidateKws = (matchedSpec.keywords + matchedSpec.canonicalCategory.lowercase(Locale.US))
                 .distinct()
                 .sortedByDescending { it.length }
-            val matchedKw = allCandidateKws.firstOrNull { lowerKeyword.contains(it) }
-            if (matchedKw != null) {
+            val matchedWord = allCandidateKws.firstOrNull { kw ->
+                lowerKw == kw || lowerKw.contains(Regex("\\b${Regex.escape(kw)}\\b"))
+            }
+            if (matchedWord != null && lowerKw != matchedWord) {
                 val remainder = extractedKeyword
-                    .replace(Regex(Regex.escape(matchedKw), RegexOption.IGNORE_CASE), "")
+                    .replace(Regex("\\b${Regex.escape(matchedWord)}\\b", RegexOption.IGNORE_CASE), " ")
                     .replace(",", " ")
                     .replace(Regex("\\b(in|near|at|around|nearby)\\b", RegexOption.IGNORE_CASE), " ")
+                    .replace(Regex("\\s+"), " ")
                     .trim()
-                if (remainder.length >= 3 &&
-                    !remainder.equals("near me", ignoreCase = true) &&
-                    !remainder.equals("me", ignoreCase = true)
-                ) {
+                val lowerRem = remainder.lowercase(Locale.US)
+                // Treat remainder as a location if it's a known location name or a 1-2 word place name
+                // and NOT a specific institution's proper name (like "Banda District Hospital" which has 3+ words)
+                val wordCount = normalized.split(Regex("\\s+")).size
+                if (remainder.length >= 3 && (knownNamedLocations.containsKey(lowerRem) || wordCount <= 3)) {
                     extractedLocation = remainder
                     extractedKeyword = matchedSpec.canonicalCategory
                 }
             }
         }
 
-        // Even if matchedSpec is null, check if the query starts or ends with a known location name
-        // (e.g. "Bakery Kanpur" or "Jhansi Book Store")
-        if (extractedLocation == null && matchedSpec == null) {
+        // 5. Also check if query starts or ends with a known location name and the other part is a category
+        if (extractedLocation == null) {
             val sortedLocKeys = knownNamedLocations.keys.sortedByDescending { it.length }
             for (locKey in sortedLocKeys) {
-                if (lowerKeyword.endsWith(" $locKey")) {
-                    val leftKw = extractedKeyword.dropLast(locKey.length).trim()
-                    if (leftKw.length >= 2) {
-                        extractedKeyword = leftKw
+                if (lowerNormalized.endsWith(" $locKey")) {
+                    val leftPart = normalized.dropLast(locKey.length).trim().trimEnd(',', '-')
+                    val spec = matchCategoryByFuzzyOrExact(leftPart)
+                    if (spec != null) {
+                        matchedSpec = spec
+                        extractedKeyword = spec.canonicalCategory
                         extractedLocation = locKey
                         break
                     }
-                } else if (lowerKeyword.startsWith("$locKey ")) {
-                    val rightKw = extractedKeyword.drop(locKey.length).trim()
-                    if (rightKw.length >= 2) {
-                        extractedKeyword = rightKw
+                } else if (lowerNormalized.startsWith("$locKey ")) {
+                    val rightPart = normalized.drop(locKey.length).trim().trimStart(',', '-')
+                    val spec = matchCategoryByFuzzyOrExact(rightPart)
+                    if (spec != null) {
+                        matchedSpec = spec
+                        extractedKeyword = spec.canonicalCategory
                         extractedLocation = locKey
                         break
                     }
-                }
-            }
-            if (extractedLocation != null) {
-                val newLower = extractedKeyword.lowercase(Locale.US)
-                matchedSpec = nearbyCategorySpecs.firstOrNull { spec ->
-                    spec.canonicalCategory.equals(extractedKeyword, ignoreCase = true) ||
-                        spec.keywords.any { kw -> newLower == kw || newLower.contains(kw) }
                 }
             }
         }
 
+        val isCategory = matchedSpec != null || hadExplicitConnector
+
         return ParsedSearchIntent(
             categorySpec = matchedSpec,
-            cleanQueryKeyword = matchedSpec?.canonicalCategory ?: extractedKeyword.ifBlank { rawQuery.trim() },
-            explicitLocationName = extractedLocation
+            cleanQueryKeyword = matchedSpec?.canonicalCategory ?: extractedKeyword.ifBlank { normalized },
+            explicitLocationName = extractedLocation,
+            isCategorySearch = isCategory
         )
+    }
+
+    /**
+     * Queries OpenStreetMap Photon API in parallel across both `photonOsmTags` and `photonSearchTerms`
+     * inside the given bounding box (`minLon, minLat, maxLon, maxLat`).
+     */
+    private suspend fun fetchPhotonCategoryInBBox(
+        intent: ParsedSearchIntent,
+        minLon: Double,
+        minLat: Double,
+        maxLon: Double,
+        maxLat: Double,
+        userOrigin: LocationPoint,
+        maxPerTerm: Int
+    ): List<Destination> = coroutineScope {
+        val spec = intent.categorySpec
+        val bboxParam = String.format(
+            Locale.US,
+            "&bbox=%.4f,%.4f,%.4f,%.4f",
+            minLon,
+            minLat,
+            maxLon,
+            maxLat
+        )
+
+        val requests = mutableListOf<String>()
+        if (spec != null) {
+            val primaryKw = URLEncoder.encode(spec.photonSearchTerms.firstOrNull() ?: spec.canonicalCategory, "UTF-8")
+            spec.photonOsmTags.take(3).forEach { osmTag ->
+                requests += "https://photon.komoot.io/api/?q=$primaryKw&osm_tag=$osmTag$bboxParam&limit=$maxPerTerm"
+            }
+            spec.photonSearchTerms.take(5).forEach { term ->
+                val encoded = URLEncoder.encode(term, "UTF-8")
+                requests += "https://photon.komoot.io/api/?q=$encoded$bboxParam&limit=$maxPerTerm"
+            }
+        } else {
+            val encoded = URLEncoder.encode(intent.cleanQueryKeyword, "UTF-8")
+            requests += "https://photon.komoot.io/api/?q=$encoded$bboxParam&limit=30"
+        }
+
+        requests.distinct().map { urlStr ->
+            async {
+                executePhotonRequest(
+                    urlStr = urlStr,
+                    userOrigin = userOrigin,
+                    categoryLabel = spec?.canonicalCategory,
+                    isCategoryQuery = true
+                )
+            }
+        }.awaitAll().flatten()
+    }
+
+    private fun executePhotonRequest(
+        urlStr: String,
+        userOrigin: LocationPoint,
+        categoryLabel: String?,
+        isCategoryQuery: Boolean
+    ): List<Destination> {
+        var connection: HttpURLConnection? = null
+        return try {
+            connection = (URL(urlStr).openConnection() as HttpURLConnection).apply {
+                requestMethod = "GET"
+                setRequestProperty("User-Agent", "RoutePilot-Navigation-Android/2.0")
+                connectTimeout = 1400
+                readTimeout = 1400
+            }
+            if (connection.responseCode !in 200..299) return emptyList()
+            val body = connection.inputStream.bufferedReader().use { it.readText() }
+            val root = JSONObject(body)
+            val features = root.optJSONArray("features") ?: return emptyList()
+            val list = mutableListOf<Destination>()
+            for (i in 0 until features.length()) {
+                val feat = features.getJSONObject(i)
+                val geom = feat.optJSONObject("geometry")?.optJSONArray("coordinates") ?: continue
+                if (geom.length() < 2) continue
+                val lng = geom.optDouble(0, Double.NaN)
+                val lat = geom.optDouble(1, Double.NaN)
+                if (lat.isNaN() || lng.isNaN()) continue
+
+                val props = feat.optJSONObject("properties") ?: JSONObject()
+                val osmKey = props.optString("osm_key", "").lowercase(Locale.US)
+                val osmValue = props.optString("osm_value", "").lowercase(Locale.US)
+
+                // For category searches, skip administrative boundaries, plain roads, and cities/villages
+                if (isCategoryQuery) {
+                    if (osmKey == "boundary" || osmKey == "place" || osmKey == "landuse") continue
+                    if (osmKey == "highway" && osmValue != "bus_stop" && osmValue != "services") continue
+                }
+
+                val rawName = props.optString("name", "").trim()
+                val city = props.optString("city", props.optString("county", props.optString("district", props.optString("state", "")))).trim()
+                val street = props.optString("street", props.optString("locality", "")).trim()
+
+                val name = if (rawName.isNotBlank()) {
+                    rawName
+                } else if (isCategoryQuery && categoryLabel != null && (street.isNotBlank() || city.isNotBlank())) {
+                    val area = street.ifBlank { city }
+                    "$categoryLabel ($area)"
+                } else {
+                    continue
+                }
+
+                val address = listOf(street, city, props.optString("state", ""), props.optString("country", ""))
+                    .map { it.trim() }
+                    .filter { it.isNotBlank() }
+                    .distinct()
+                    .joinToString(", ")
+                    .ifBlank { name }
+
+                val distFromUserKm = GeoUtils.haversineMeters(
+                    userOrigin.latitude,
+                    userOrigin.longitude,
+                    lat,
+                    lng
+                ) / 1000.0
+
+                val osmId = props.optLong("osm_id", i.toLong())
+                list.add(
+                    Destination(
+                        id = "photon_${osmId}_${String.format(Locale.US, "%.4f_%.4f", lat, lng)}",
+                        name = name,
+                        address = address,
+                        category = categoryLabel
+                            ?: osmValue.replace("_", " ").replaceFirstChar { it.uppercase() }.ifBlank { "Location" },
+                        latitude = lat,
+                        longitude = lng,
+                        distanceFromUserKm = distFromUserKm,
+                        isDemoSample = false
+                    )
+                )
+            }
+            list
+        } catch (_: Exception) {
+            emptyList()
+        } finally {
+            connection?.disconnect()
+        }
+    }
+
+    private fun fetchNominatimCategoryPlaces(
+        intent: ParsedSearchIntent,
+        searchCenter: LocationPoint,
+        delta: Double,
+        userOrigin: LocationPoint
+    ): List<Destination> {
+        val left = searchCenter.longitude - delta
+        val top = searchCenter.latitude + delta
+        val right = searchCenter.longitude + delta
+        val bottom = searchCenter.latitude - delta
+
+        val queryText = if (!intent.explicitLocationName.isNullOrBlank()) {
+            "${intent.cleanQueryKeyword} in ${intent.explicitLocationName}"
+        } else {
+            intent.cleanQueryKeyword
+        }
+        val encodedQuery = URLEncoder.encode(queryText, "UTF-8")
+        val viewboxParam = String.format(Locale.US, "&viewbox=%.4f,%.4f,%.4f,%.4f", left, top, right, bottom)
+        val boundedParam = if (intent.explicitLocationName.isNullOrBlank()) "&bounded=1" else ""
+        val urlStr = "https://nominatim.openstreetmap.org/search?q=$encodedQuery&format=jsonv2&limit=30$viewboxParam$boundedParam&addressdetails=1"
+
+        return executeNominatimRequest(
+            urlStr = urlStr,
+            userOrigin = userOrigin,
+            categoryLabel = intent.categorySpec?.canonicalCategory,
+            isCategoryQuery = true
+        )
+    }
+
+    private fun fetchNominatimCategoryInBBox(
+        intent: ParsedSearchIntent,
+        minLon: Double,
+        minLat: Double,
+        maxLon: Double,
+        maxLat: Double,
+        userOrigin: LocationPoint
+    ): List<Destination> {
+        val encodedQuery = URLEncoder.encode(intent.cleanQueryKeyword, "UTF-8")
+        val viewboxParam = String.format(Locale.US, "&viewbox=%.4f,%.4f,%.4f,%.4f&bounded=1", minLon, maxLat, maxLon, minLat)
+        val urlStr = "https://nominatim.openstreetmap.org/search?q=$encodedQuery&format=jsonv2&limit=30$viewboxParam&addressdetails=1"
+        return executeNominatimRequest(
+            urlStr = urlStr,
+            userOrigin = userOrigin,
+            categoryLabel = intent.categorySpec?.canonicalCategory,
+            isCategoryQuery = true
+        )
+    }
+
+    private fun executeNominatimRequest(
+        urlStr: String,
+        userOrigin: LocationPoint,
+        categoryLabel: String?,
+        isCategoryQuery: Boolean
+    ): List<Destination> {
+        var connection: HttpURLConnection? = null
+        return try {
+            connection = (URL(urlStr).openConnection() as HttpURLConnection).apply {
+                requestMethod = "GET"
+                setRequestProperty("User-Agent", "RoutePilot-Navigation-Android/2.0")
+                connectTimeout = 1500
+                readTimeout = 1500
+            }
+            if (connection.responseCode !in 200..299) return emptyList()
+            val body = connection.inputStream.bufferedReader().use { it.readText() }
+            val arr = JSONArray(body)
+            val list = mutableListOf<Destination>()
+            for (i in 0 until arr.length()) {
+                val obj = arr.getJSONObject(i)
+                val lat = obj.optString("lat", "").toDoubleOrNull() ?: continue
+                val lon = obj.optString("lon", "").toDoubleOrNull() ?: continue
+                val osmCategory = obj.optString("category", "").lowercase(Locale.US)
+                val osmType = obj.optString("type", "").lowercase(Locale.US)
+
+                if (isCategoryQuery) {
+                    if (osmCategory == "boundary" || osmCategory == "place" || osmCategory == "highway") continue
+                    if (osmType in listOf("administrative", "city", "town", "village", "prison", "courthouse")) continue
+                }
+
+                val displayName = obj.optString("display_name", "")
+                val rawName = obj.optString("name", "").trim()
+                val name = rawName.ifBlank {
+                    displayName.substringBefore(",").trim()
+                }
+                if (name.isBlank()) continue
+
+                val address = displayName.substringAfter(",", displayName).trim().ifBlank { name }
+                val category = categoryLabel
+                    ?: osmType.replace("_", " ").replaceFirstChar { it.uppercase() }.ifBlank { "Location" }
+                val distKm = GeoUtils.haversineMeters(
+                    userOrigin.latitude,
+                    userOrigin.longitude,
+                    lat,
+                    lon
+                ) / 1000.0
+                list.add(
+                    Destination(
+                        id = "nom_${obj.optLong("place_id", i.toLong())}_${String.format(Locale.US, "%.4f_%.4f", lat, lon)}",
+                        name = name,
+                        address = address,
+                        category = category,
+                        latitude = lat,
+                        longitude = lon,
+                        distanceFromUserKm = distKm,
+                        isDemoSample = false
+                    )
+                )
+            }
+            list
+        } catch (_: Exception) {
+            emptyList()
+        } finally {
+            connection?.disconnect()
+        }
+    }
+
+    /**
+     * Validates that a returned place genuinely belongs to the searched category and is not
+     * an unrelated building that merely sits on "Hospital Road" or "Station Road" (like "BANDA PRISON" or "CDO OFFICE").
+     */
+    private fun isValidCategoryResult(place: Destination, intent: ParsedSearchIntent): Boolean {
+        val lowerName = place.name.lowercase(Locale.US).trim()
+        if (lowerName.isEmpty()) return false
+
+        // Never treat the city/district name itself as a category POI
+        val explicitLocLower = intent.explicitLocationName?.trim()?.lowercase(Locale.US)
+        if (explicitLocLower != null && lowerName == explicitLocLower) return false
+        if (knownNamedLocations.containsKey(lowerName)) return false
+
+        // Reject obvious false positives when searching for hospitals/schools/etc.
+        val forbiddenNonPoiTerms = listOf("prison", "jail", "cdo office", "collectorate", "tehsil office")
+        if (intent.categorySpec?.canonicalCategory != "Police Station" &&
+            forbiddenNonPoiTerms.any { lowerName.contains(it) }
+        ) {
+            return false
+        }
+
+        val spec = intent.categorySpec ?: return true
+        val verifyTerms = spec.matchVerifyTerms
+        if (verifyTerms.isEmpty()) return true
+
+        val lowerCat = place.category.lowercase(Locale.US)
+        val matchesName = verifyTerms.any { term -> lowerName.contains(term) }
+        val matchesCategory = verifyTerms.any { term -> lowerCat.contains(term) }
+        return matchesName || matchesCategory
+    }
+
+    private suspend fun fetchPhotonLocationPlaces(
+        query: String,
+        userOrigin: LocationPoint
+    ): List<Destination> = coroutineScope {
+        val encoded = URLEncoder.encode(query, "UTF-8")
+        val encodedIndia = URLEncoder.encode("$query India", "UTF-8")
+        val urlBiased = "https://photon.komoot.io/api/?q=$encoded&lat=${userOrigin.latitude}&lon=${userOrigin.longitude}&limit=8"
+        val urlIndia = "https://photon.komoot.io/api/?q=$encodedIndia&limit=6"
+
+        val d1 = async {
+            executePhotonRequest(
+                urlStr = urlBiased,
+                userOrigin = userOrigin,
+                categoryLabel = null,
+                isCategoryQuery = false
+            )
+        }
+        val d2 = async {
+            executePhotonRequest(
+                urlStr = urlIndia,
+                userOrigin = userOrigin,
+                categoryLabel = null,
+                isCategoryQuery = false
+            )
+        }
+        d1.await() + d2.await()
+    }
+
+    private fun fetchNominatimLocationPlaces(
+        query: String,
+        userOrigin: LocationPoint
+    ): List<Destination> {
+        val encoded = URLEncoder.encode(query, "UTF-8")
+        val urlStr = "https://nominatim.openstreetmap.org/search?q=$encoded&format=jsonv2&limit=8&addressdetails=1"
+        return executeNominatimRequest(
+            urlStr = urlStr,
+            userOrigin = userOrigin,
+            categoryLabel = null,
+            isCategoryQuery = false
+        )
+    }
+
+    private fun fetchAndroidGeocoderLocationPlaces(
+        query: String,
+        userOrigin: LocationPoint
+    ): List<Destination> {
+        return try {
+            if (!Geocoder.isPresent()) return emptyList()
+            val geocoder = Geocoder(context, Locale.getDefault())
+            @Suppress("DEPRECATION")
+            val addresses = geocoder.getFromLocationName(query, 5)
+            addresses?.mapIndexedNotNull { idx, addr ->
+                if (addr.hasLatitude() && addr.hasLongitude()) {
+                    val distKm = GeoUtils.haversineMeters(
+                        userOrigin.latitude,
+                        userOrigin.longitude,
+                        addr.latitude,
+                        addr.longitude
+                    ) / 1000.0
+                    Destination(
+                        id = "geo_loc_${addr.latitude}_${addr.longitude}_$idx",
+                        name = addr.locality ?: addr.subAdminArea ?: addr.featureName ?: query,
+                        address = addr.getAddressLine(0) ?: addr.locality ?: query,
+                        category = "Location",
+                        latitude = addr.latitude,
+                        longitude = addr.longitude,
+                        distanceFromUserKm = distKm,
+                        isDemoSample = false
+                    )
+                } else null
+            }.orEmpty()
+        } catch (_: Exception) {
+            emptyList()
+        }
     }
 
     private fun fetchGooglePlacesSearch(
@@ -1191,26 +1789,30 @@ class DestinationRepositoryImpl(
         var connection: HttpURLConnection? = null
         return try {
             val searchText = if (!intent.explicitLocationName.isNullOrBlank()) {
-                "${intent.cleanQueryKeyword} near ${intent.explicitLocationName}"
+                "${intent.cleanQueryKeyword} in ${intent.explicitLocationName}"
             } else {
                 intent.cleanQueryKeyword
             }
             val encodedQuery = URLEncoder.encode(searchText, "UTF-8")
-            val locParam = "&location=${searchCenter.latitude},${searchCenter.longitude}&radius=12000"
+            val locParam = if (intent.isCategorySearch) {
+                "&location=${searchCenter.latitude},${searchCenter.longitude}&radius=25000"
+            } else {
+                ""
+            }
             val typeParam = intent.categorySpec?.googlePlaceType?.let { "&type=$it" } ?: ""
             val urlStr =
                 "https://maps.googleapis.com/maps/api/place/textsearch/json?query=$encodedQuery$locParam$typeParam&key=$apiKey"
             connection = (URL(urlStr).openConnection() as HttpURLConnection).apply {
                 requestMethod = "GET"
-                connectTimeout = 1000
-                readTimeout = 1000
+                connectTimeout = 1400
+                readTimeout = 1400
             }
             if (connection.responseCode !in 200..299) return emptyList()
             val body = connection.inputStream.bufferedReader().use { it.readText() }
             val root = JSONObject(body)
             val results = root.optJSONArray("results") ?: JSONArray()
             val list = mutableListOf<Destination>()
-            for (i in 0 until minOf(results.length(), 18)) {
+            for (i in 0 until minOf(results.length(), 20)) {
                 val item = results.getJSONObject(i)
                 val geom = item.optJSONObject("geometry")?.optJSONObject("location") ?: continue
                 val lat = geom.optDouble("lat", Double.NaN)
@@ -1230,7 +1832,7 @@ class DestinationRepositoryImpl(
                         id = placeId,
                         name = name,
                         address = address,
-                        category = intent.categorySpec?.canonicalCategory ?: "Place",
+                        category = intent.categorySpec?.canonicalCategory ?: "Location",
                         latitude = lat,
                         longitude = lng,
                         distanceFromUserKm = distKm,
@@ -1246,18 +1848,14 @@ class DestinationRepositoryImpl(
         }
     }
 
-    /**
-     * Queries OpenStreetMap Overpass API (`around:12000,lat,lon`) for all real-world places
-     * matching the category or keyword around `searchCenter`.
-     */
     private fun fetchOverpassNearbyPlaces(
         intent: ParsedSearchIntent,
         searchCenter: LocationPoint,
+        radiusMeters: Int,
         userOrigin: LocationPoint
     ): List<Destination> {
         val lat = searchCenter.latitude
         val lon = searchCenter.longitude
-        val radiusMeters = 12000
 
         val selectors = if (intent.categorySpec != null) {
             intent.categorySpec.overpassSelectors.map { selector ->
@@ -1274,14 +1872,14 @@ class DestinationRepositoryImpl(
         }
 
         val overpassQuery = buildString {
-            append("[out:json][timeout:6];(")
+            append("[out:json][timeout:4];(")
             selectors.forEach { append(it) }
-            append(");out center 22;")
+            append(");out center 35;")
         }
 
         val endpoints = listOf(
-            "https://overpass-api.de/api/interpreter",
-            "https://overpass.kumi.systems/api/interpreter"
+            "https://overpass.kumi.systems/api/interpreter",
+            "https://overpass-api.de/api/interpreter"
         )
 
         for (endpoint in endpoints) {
@@ -1291,9 +1889,9 @@ class DestinationRepositoryImpl(
                 val url = URL("$endpoint?data=$encodedData")
                 connection = (url.openConnection() as HttpURLConnection).apply {
                     requestMethod = "GET"
-                    setRequestProperty("User-Agent", "RoutePilot-Navigation-Android/1.0")
-                    connectTimeout = 4500
-                    readTimeout = 4500
+                    setRequestProperty("User-Agent", "RoutePilot-Navigation-Android/2.0")
+                    connectTimeout = 2000
+                    readTimeout = 2000
                 }
                 if (connection.responseCode !in 200..299) continue
                 val responseText = connection.inputStream.bufferedReader().use { it.readText() }
@@ -1331,7 +1929,7 @@ class DestinationRepositoryImpl(
                     val displayName = if (rawName.isNotBlank()) {
                         rawName
                     } else {
-                        val suburb = tags.optString("addr:suburb", tags.optString("addr:Street", ""))
+                        val suburb = tags.optString("addr:suburb", tags.optString("addr:city", tags.optString("addr:district", "")))
                         if (suburb.isNotBlank()) "$categoryLabel ($suburb)" else continue
                     }
 
@@ -1339,14 +1937,13 @@ class DestinationRepositoryImpl(
                         tags.optString("addr:housename", ""),
                         tags.optString("addr:street", ""),
                         tags.optString("addr:suburb", tags.optString("addr:neighbourhood", "")),
-                        tags.optString("addr:city", tags.optString("addr:district", "")),
-                        tags.optString("opening_hours", "").let { if (it.isNotBlank()) "Hours: $it" else "" }
+                        tags.optString("addr:city", tags.optString("addr:district", ""))
                     ).filter { it.isNotBlank() }
 
                     val address = if (addressParts.isNotEmpty()) {
                         addressParts.joinToString(", ")
                     } else {
-                        val localityHint = intent.explicitLocationName?.takeIf { it.isNotBlank() } ?: "Nearby Area"
+                        val localityHint = intent.explicitLocationName?.takeIf { it.isNotBlank() } ?: categoryLabel
                         String.format(Locale.US, "%s • %.4f, %.4f", localityHint, elLat, elLon)
                     }
 
@@ -1376,7 +1973,6 @@ class DestinationRepositoryImpl(
                     return parsed
                 }
             } catch (_: Exception) {
-                // Try next endpoint
             } finally {
                 connection?.disconnect()
             }
@@ -1384,168 +1980,25 @@ class DestinationRepositoryImpl(
         return emptyList()
     }
 
-    /**
-     * Queries OpenStreetMap Nominatim within a bounded viewbox around `searchCenter`.
-     */
-    private fun fetchNominatimBoundedPlaces(
-        intent: ParsedSearchIntent,
-        searchCenter: LocationPoint,
-        userOrigin: LocationPoint
-    ): List<Destination> {
-        var connection: HttpURLConnection? = null
-        return try {
-            val delta = 0.16 // ~18 km bounding box around searchCenter
-            val left = searchCenter.longitude - delta
-            val top = searchCenter.latitude + delta
-            val right = searchCenter.longitude + delta
-            val bottom = searchCenter.latitude - delta
-
-            val encodedQuery = URLEncoder.encode(intent.cleanQueryKeyword, "UTF-8")
-            val urlStr = "https://nominatim.openstreetmap.org/search?q=$encodedQuery" +
-                "&format=jsonv2&limit=15&viewbox=$left,$top,$right,$bottom&bounded=1&addressdetails=1"
-
-            connection = (URL(urlStr).openConnection() as HttpURLConnection).apply {
-                requestMethod = "GET"
-                setRequestProperty("User-Agent", "RoutePilot-Navigation-Android/1.0")
-                connectTimeout = 1000
-                readTimeout = 1000
-            }
-            if (connection.responseCode !in 200..299) return emptyList()
-            val body = connection.inputStream.bufferedReader().use { it.readText() }
-            val arr = JSONArray(body)
-            val list = mutableListOf<Destination>()
-            for (i in 0 until arr.length()) {
-                val obj = arr.getJSONObject(i)
-                val lat = obj.optString("lat", "").toDoubleOrNull() ?: continue
-                val lon = obj.optString("lon", "").toDoubleOrNull() ?: continue
-                val displayName = obj.optString("display_name", "")
-                val name = obj.optString("name", "").ifBlank {
-                    displayName.substringBefore(",").ifBlank { intent.cleanQueryKeyword }
-                }
-                val address = displayName.substringAfter(",", displayName).trim().ifBlank { name }
-                val category = intent.categorySpec?.canonicalCategory
-                    ?: obj.optString("type", "Place").replace("_", " ").replaceFirstChar { it.uppercase() }
-                val distKm = GeoUtils.haversineMeters(
-                    userOrigin.latitude,
-                    userOrigin.longitude,
-                    lat,
-                    lon
-                ) / 1000.0
-                list.add(
-                    Destination(
-                        id = "nom_${obj.optLong("place_id", i.toLong())}_$i",
-                        name = name,
-                        address = address,
-                        category = category,
-                        latitude = lat,
-                        longitude = lon,
-                        distanceFromUserKm = distKm,
-                        isDemoSample = false
-                    )
-                )
-            }
-            list
-        } catch (_: Exception) {
-            emptyList()
-        } finally {
-            connection?.disconnect()
-        }
-    }
-
-    private fun fetchPhotonOrNominatimPlaces(
-        query: String,
-        searchCenter: LocationPoint,
-        userOrigin: LocationPoint,
-        categoryLabel: String?
-    ): List<Destination> {
-        var connection: HttpURLConnection? = null
-        return try {
-            val encodedQuery = URLEncoder.encode(query, "UTF-8")
-            val biasParams = "&lat=${searchCenter.latitude}&lon=${searchCenter.longitude}"
-            val urlStr = "https://photon.komoot.io/api/?q=$encodedQuery$biasParams&limit=16"
-            connection = (URL(urlStr).openConnection() as HttpURLConnection).apply {
-                requestMethod = "GET"
-                setRequestProperty("User-Agent", "RoutePilot-Navigation-Android/1.0")
-                connectTimeout = 1000
-                readTimeout = 1000
-            }
-            if (connection.responseCode !in 200..299) return emptyList()
-            val body = connection.inputStream.bufferedReader().use { it.readText() }
-            val root = JSONObject(body)
-            val features = root.optJSONArray("features") ?: return emptyList()
-            val list = mutableListOf<Destination>()
-            for (i in 0 until features.length()) {
-                val feat = features.getJSONObject(i)
-                val geom = feat.optJSONObject("geometry")?.optJSONArray("coordinates") ?: continue
-                if (geom.length() < 2) continue
-                val lng = geom.optDouble(0, Double.NaN)
-                val lat = geom.optDouble(1, Double.NaN)
-                if (lat.isNaN() || lng.isNaN()) continue
-
-                // Keep places reasonably near searchCenter (<= 60 km) for category searches
-                val distFromCenterKm = GeoUtils.haversineMeters(
-                    searchCenter.latitude,
-                    searchCenter.longitude,
-                    lat,
-                    lng
-                ) / 1000.0
-                if (categoryLabel != null && distFromCenterKm > 60.0) continue
-
-                val props = feat.optJSONObject("properties") ?: JSONObject()
-                val name = props.optString("name", "").ifBlank {
-                    props.optString("street", query)
-                }
-                val city = props.optString("city", props.optString("district", props.optString("state", "")))
-                val address = listOf(props.optString("street", ""), city, props.optString("country", ""))
-                    .filter { it.isNotBlank() }
-                    .joinToString(", ")
-                    .ifBlank { name }
-                val distFromUserKm = GeoUtils.haversineMeters(
-                    userOrigin.latitude,
-                    userOrigin.longitude,
-                    lat,
-                    lng
-                ) / 1000.0
-                list.add(
-                    Destination(
-                        id = "osm_place_${lat}_${lng}_$i",
-                        name = name,
-                        address = address,
-                        category = categoryLabel
-                            ?: props.optString("osm_value", "Place").replace("_", " ").replaceFirstChar { it.uppercase() },
-                        latitude = lat,
-                        longitude = lng,
-                        distanceFromUserKm = distFromUserKm,
-                        isDemoSample = false
-                    )
-                )
-            }
-            list
-        } catch (_: Exception) {
-            emptyList()
-        } finally {
-            connection?.disconnect()
-        }
-    }
-
     private fun fetchAndroidGeocoderPlaces(
         query: String,
         searchCenter: LocationPoint,
-        userOrigin: LocationPoint
+        delta: Double,
+        userOrigin: LocationPoint,
+        categoryLabel: String?
     ): List<Destination> {
         return try {
             if (!Geocoder.isPresent()) return emptyList()
             val geocoder = Geocoder(context, Locale.getDefault())
-            val delta = 0.18
             @Suppress("DEPRECATION")
             val addresses = geocoder.getFromLocationName(
                 query,
-                8,
+                10,
                 searchCenter.latitude - delta,
                 searchCenter.longitude - delta,
                 searchCenter.latitude + delta,
                 searchCenter.longitude + delta
-            ) ?: geocoder.getFromLocationName(query, 5)
+            )
 
             addresses?.mapIndexedNotNull { idx, addr ->
                 if (addr.hasLatitude() && addr.hasLongitude()) {
@@ -1559,7 +2012,7 @@ class DestinationRepositoryImpl(
                         id = "geo_${addr.latitude}_${addr.longitude}_$idx",
                         name = addr.featureName ?: query,
                         address = addr.getAddressLine(0) ?: addr.locality ?: query,
-                        category = "Place",
+                        category = categoryLabel ?: "Place",
                         latitude = addr.latitude,
                         longitude = addr.longitude,
                         distanceFromUserKm = distKm,
@@ -1578,16 +2031,16 @@ class DestinationRepositoryImpl(
     ): LocationPoint? {
         var connection: HttpURLConnection? = null
         return try {
-            val encoded = URLEncoder.encode(locationName, "UTF-8")
+            val encoded = URLEncoder.encode("$locationName India", "UTF-8")
             val bias = if (biasLocation != null) {
                 "&lat=${biasLocation.latitude}&lon=${biasLocation.longitude}"
             } else ""
-            val urlStr = "https://photon.komoot.io/api/?q=$encoded$bias&limit=1"
+            val urlStr = "https://photon.komoot.io/api/?q=$encoded$bias&limit=3"
             connection = (URL(urlStr).openConnection() as HttpURLConnection).apply {
                 requestMethod = "GET"
-                setRequestProperty("User-Agent", "RoutePilot-Navigation-Android/1.0")
-                connectTimeout = 900
-                readTimeout = 900
+                setRequestProperty("User-Agent", "RoutePilot-Navigation-Android/2.0")
+                connectTimeout = 1100
+                readTimeout = 1100
             }
             if (connection.responseCode !in 200..299) return null
             val body = connection.inputStream.bufferedReader().use { it.readText() }
@@ -1604,129 +2057,30 @@ class DestinationRepositoryImpl(
         }
     }
 
-    /**
-     * Builds realistic, well-spaced category places around `searchCenter` so that whether the user
-     * searches around their current GPS location or around a specified location, the map always has
-     * multiple accurate Red Location Markers for that category.
-     */
-    private fun buildCategoryPlacesAroundCenter(
-        spec: NearbyCategorySpec,
-        searchCenter: LocationPoint,
-        userOrigin: LocationPoint,
-        locationLabel: String?
-    ): List<Destination> {
-        val areaSuffix = locationLabel?.trim()?.takeIf { it.isNotEmpty() }
-            ?.replaceFirstChar { it.uppercase() }
-        val basePlaces = spec.fallbackTemplates.map { tpl ->
-            val lat = searchCenter.latitude + tpl.dLat
-            val lng = searchCenter.longitude + tpl.dLng
-            val distKm = GeoUtils.haversineMeters(
-                userOrigin.latitude,
-                userOrigin.longitude,
-                lat,
-                lng
-            ) / 1000.0
-            val fullAddress = if (areaSuffix != null) {
-                "${tpl.roadHint}, $areaSuffix"
-            } else {
-                tpl.roadHint
-            }
-            Destination(
-                id = "nearby_${spec.canonicalCategory.lowercase(Locale.US).replace(" ", "_")}_${tpl.idSuffix}_${String.format(Locale.US, "%.3f_%.3f", lat, lng)}",
-                name = tpl.name,
-                address = fullAddress,
-                category = spec.canonicalCategory,
-                latitude = lat,
-                longitude = lng,
-                distanceFromUserKm = distKm,
-                isDemoSample = false
-            )
-        }
-        // Ensure every category has at least 12 red markers distributed across the area like Google Maps
-        if (basePlaces.size >= 12) return basePlaces
-        val extraOffsets = listOf(
-            Triple("North Corridor ${spec.canonicalCategory}", "North Highway Link", Pair(0.0195, -0.0038)),
-            Triple("South Point ${spec.canonicalCategory}", "South Bypass Road", Pair(-0.0148, 0.0042)),
-            Triple("East Wing ${spec.canonicalCategory}", "East Ring Road", Pair(0.0064, 0.0168)),
-            Triple("West Plaza ${spec.canonicalCategory}", "West Main Road", Pair(-0.0042, -0.0154)),
-            Triple("Central ${spec.canonicalCategory}", "Central Chauraha", Pair(0.0018, 0.0022)),
-            Triple("Highway ${spec.canonicalCategory}", "NH Bypass Junction", Pair(0.0235, 0.0085))
-        )
-        val extraPlaces = extraOffsets.mapIndexed { idx, (name, road, delta) ->
-            val lat = searchCenter.latitude + delta.first
-            val lng = searchCenter.longitude + delta.second
-            val distKm = GeoUtils.haversineMeters(userOrigin.latitude, userOrigin.longitude, lat, lng) / 1000.0
-            Destination(
-                id = "nearby_extra_${spec.canonicalCategory.lowercase(Locale.US).replace(" ", "_")}_$idx",
-                name = name,
-                address = if (areaSuffix != null) "$road, $areaSuffix" else road,
-                category = spec.canonicalCategory,
-                latitude = lat,
-                longitude = lng,
-                distanceFromUserKm = distKm,
-                isDemoSample = false
-            )
-        }
-        return (basePlaces + extraPlaces).take(14)
-    }
-
-    private fun buildGenericPlacesAroundCenter(
-        keyword: String,
-        searchCenter: LocationPoint,
-        userOrigin: LocationPoint,
-        locationLabel: String?
-    ): List<Destination> {
-        val title = keyword.trim().replaceFirstChar { it.uppercase() }
-        val area = locationLabel?.trim()?.takeIf { it.isNotEmpty() }?.replaceFirstChar { it.uppercase() } ?: "Main Corridor"
-        val offsets = listOf(
-            Triple("$title", "Main Highway Crossing, $area", Pair(0.0022, 0.0018)),
-            Triple("Central $title", "Main Market Road, $area", Pair(0.0055, 0.0065)),
-            Triple("$title — Civil Lines", "Civil Lines Avenue, $area", Pair(-0.0062, 0.0052)),
-            Triple("$title — Highway Hub", "NH-27 Ring Road, $area", Pair(0.0114, 0.0098)),
-            Triple("$title — Sipri Plaza", "Sipri Commercial Block, $area", Pair(0.0046, -0.0082)),
-            Triple("$title — Station Road", "Junction Road, $area", Pair(-0.0078, -0.0064)),
-            Triple("$title — North Point", "University Link Road, $area", Pair(0.0165, -0.0045)),
-            Triple("$title — South Bypass", "South Highway Corridor, $area", Pair(-0.0135, 0.0018)),
-            Triple("$title — East Square", "East Link Road, $area", Pair(0.0085, 0.0152)),
-            Triple("$title — West Gate", "West Bypass Circle, $area", Pair(0.0015, -0.0138))
-        )
-        return offsets.mapIndexed { idx, (name, addr, delta) ->
-            val lat = searchCenter.latitude + delta.first
-            val lng = searchCenter.longitude + delta.second
-            val distKm = GeoUtils.haversineMeters(
-                userOrigin.latitude,
-                userOrigin.longitude,
-                lat,
-                lng
-            ) / 1000.0
-            Destination(
-                id = "search_custom_${title.lowercase(Locale.US).replace(" ", "_")}_$idx",
-                name = name,
-                address = addr,
-                category = title,
-                latitude = lat,
-                longitude = lng,
-                distanceFromUserKm = distKm,
-                isDemoSample = false
-            )
-        }
-    }
-
-    private fun deduplicatePlaces(places: List<Destination>): List<Destination> {
+    fun deduplicatePlaces(places: List<Destination>): List<Destination> {
         val unique = mutableListOf<Destination>()
+        val seenIds = HashSet<String>()
         for (candidate in places) {
-            val isDuplicate = unique.any { existing ->
-                val sameName = existing.name.equals(candidate.name, ignoreCase = true)
-                val distMeters = GeoUtils.haversineMeters(
-                    existing.latitude,
-                    existing.longitude,
-                    candidate.latitude,
-                    candidate.longitude
-                )
-                distMeters < 65.0 || (sameName && distMeters < 450.0)
-            }
-            if (!isDuplicate) {
-                unique.add(candidate)
+            if (!seenIds.contains(candidate.id)) {
+                val isDuplicate = unique.any { existing ->
+                    val sameName = existing.name.equals(candidate.name, ignoreCase = true)
+                    val distMeters = GeoUtils.haversineMeters(
+                        existing.latitude,
+                        existing.longitude,
+                        candidate.latitude,
+                        candidate.longitude
+                    )
+                    val sameNameThreshold = if (candidate.category == "Location" || existing.category == "Location") {
+                        15_000.0
+                    } else {
+                        450.0
+                    }
+                    existing.id == candidate.id || distMeters < 65.0 || (sameName && distMeters < sameNameThreshold)
+                }
+                if (!isDuplicate) {
+                    seenIds.add(candidate.id)
+                    unique.add(candidate)
+                }
             }
         }
         return unique

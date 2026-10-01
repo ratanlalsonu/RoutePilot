@@ -223,6 +223,7 @@ fun RoutePilotAppRoot(
                         onUseCurrentLocation = viewModel::openDestinationSearchAtCurrentLocation,
                         onSelectPlaceSuggestion = viewModel::focusOnSinglePlaceCandidate,
                         onMapClickLocation = viewModel::selectPointOnMap,
+                        onMapViewportChanged = viewModel::onMapViewportChanged,
                         onConfirmDestination = {
                             viewModel.confirmDestinationAndCalculatePreview {
                                 navController.navigate(RoutePilotRoutes.ROUTE_PREVIEW)

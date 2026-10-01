@@ -8,6 +8,7 @@ import com.example.domain.model.HazardType
 import com.example.domain.routing.AStarRoutingEngine
 import com.example.domain.routing.OsmRoadNetworkProvider
 import com.example.domain.routing.RouteImpactDetector
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
@@ -163,6 +164,30 @@ class AStarAndImpactTest {
             "Live time formatting includes seconds when not on exact minute boundary",
             com.example.domain.routing.GeoUtils.formatLiveRemainingTime(222).contains("3 min 42 s")
         )
+    }
+
+    @Test
+    fun `category matching and red marker icon resolution work for general categories and single locations`() {
+        val hospExact = com.example.data.repository.DestinationRepositoryImpl.matchCategoryByFuzzyOrExact("hospital")
+        val hospTypo = com.example.data.repository.DestinationRepositoryImpl.matchCategoryByFuzzyOrExact("hospotal")
+        val fuelSpec = com.example.data.repository.DestinationRepositoryImpl.matchCategoryByFuzzyOrExact("petrol pump")
+        val schoolSpec = com.example.data.repository.DestinationRepositoryImpl.matchCategoryByFuzzyOrExact("school")
+        val bankSpec = com.example.data.repository.DestinationRepositoryImpl.matchCategoryByFuzzyOrExact("bank")
+        val bandaOnly = com.example.data.repository.DestinationRepositoryImpl.matchCategoryByFuzzyOrExact("Banda")
+
+        assertEquals("Hospital", hospExact?.canonicalCategory)
+        assertEquals("Hospital", hospTypo?.canonicalCategory)
+        assertEquals("Fuel Station", fuelSpec?.canonicalCategory)
+        assertEquals("School", schoolSpec?.canonicalCategory)
+        assertEquals("Bank & ATM", bankSpec?.canonicalCategory)
+        assertEquals(null, bandaOnly)
+        assertTrue(com.example.data.repository.DestinationRepositoryImpl.isKnownLocationName("Banda"))
+
+        assertEquals("HOSPITAL", com.example.ui.components.resolveCategoryIconType("Hospital", "Banda District Hospital"))
+        assertEquals("FUEL", com.example.ui.components.resolveCategoryIconType("Fuel Station", "Indian Oil"))
+        assertEquals("SCHOOL", com.example.ui.components.resolveCategoryIconType("School", "DAV Inter College"))
+        assertEquals("BANK", com.example.ui.components.resolveCategoryIconType("Bank & ATM", "State Bank of India"))
+        assertEquals("LOCATION", com.example.ui.components.resolveCategoryIconType("Location", "Banda"))
     }
 }
 
