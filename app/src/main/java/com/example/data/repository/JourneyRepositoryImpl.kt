@@ -15,7 +15,8 @@ class JourneyRepositoryImpl(
 
     override suspend fun saveJourney(journey: Journey) {
         dao.insertJourney(JourneyEntity.fromDomain(journey))
-        firestoreDataSource.saveDriverJourney(journey)
+        runCatching { firestoreDataSource.saveDriverJourney(journey) }
+        runCatching { com.example.data.remote.UserConsoleFirestoreBridge.syncJourney(journey) }
     }
 
     override fun getJourneyHistory(includeDemoSamples: Boolean): Flow<List<Journey>> {

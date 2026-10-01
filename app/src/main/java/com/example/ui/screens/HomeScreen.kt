@@ -32,10 +32,12 @@ import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.LocationOn
 import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.Mic
+import androidx.compose.material.icons.filled.Navigation
 import androidx.compose.material.icons.filled.Person
 import androidx.compose.material.icons.filled.Restore
 import androidx.compose.material.icons.filled.School
 import androidx.compose.material.icons.filled.Search
+import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Train
 import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material.icons.filled.Work
@@ -123,6 +125,7 @@ fun HomeScreen(
     val scope = rememberCoroutineScope()
     var showAllRecentSheet by remember { mutableStateOf(false) }
     var isInlineSeeAllExpanded by remember { mutableStateOf(false) }
+    var showChangeAvatarDialog by remember { mutableStateOf(false) }
 
     // By default show 4 visited destinations on Home Screen; if expanded or in See All sheet, show all visited destinations
     val displayedHomeDestinations = if (isInlineSeeAllExpanded) {
@@ -145,20 +148,16 @@ fun HomeScreen(
                         .windowInsetsPadding(WindowInsets.statusBars)
                         .padding(24.dp)
                 ) {
-                    Box(
-                        modifier = Modifier
-                            .size(54.dp)
-                            .clip(CircleShape)
-                            .background(RoutePilotBlue),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.Person,
-                            contentDescription = "Profile",
-                            tint = Color.White,
-                            modifier = Modifier.size(30.dp)
-                        )
-                    }
+                    com.example.ui.components.UserProfileAvatar(
+                        size = 62.dp,
+                        userName = currentUser?.name.orEmpty(),
+                        showEditBadge = true,
+                        onClick = {
+                            scope.launch { drawerState.close() }
+                            showChangeAvatarDialog = true
+                        },
+                        modifier = Modifier.testTag("drawer_profile_avatar")
+                    )
                     Spacer(modifier = Modifier.height(12.dp))
                     Text(
                         text = currentUser?.name
@@ -182,13 +181,26 @@ fun HomeScreen(
                 Spacer(modifier = Modifier.height(12.dp))
 
                 NavigationDrawerItem(
-                    label = { Text(stringResource(R.string.nav_navigate)) },
+                    icon = {
+                        Icon(
+                            imageVector = Icons.Default.Navigation,
+                            contentDescription = stringResource(R.string.nav_navigate)
+                        )
+                    },
+                    label = { Text(stringResource(R.string.nav_navigate), fontWeight = FontWeight.SemiBold) },
                     selected = true,
                     onClick = { scope.launch { drawerState.close() } },
                     modifier = Modifier.padding(horizontal = 12.dp)
                 )
                 NavigationDrawerItem(
-                    label = { Text(stringResource(R.string.title_select_destination)) },
+                    icon = {
+                        Icon(
+                            imageVector = Icons.Default.LocationOn,
+                            contentDescription = stringResource(R.string.title_select_destination),
+                            tint = HazardRed
+                        )
+                    },
+                    label = { Text(stringResource(R.string.title_select_destination), fontWeight = FontWeight.Medium) },
                     selected = false,
                     onClick = {
                         scope.launch { drawerState.close() }
@@ -197,7 +209,14 @@ fun HomeScreen(
                     modifier = Modifier.padding(horizontal = 12.dp)
                 )
                 NavigationDrawerItem(
-                    label = { Text(stringResource(R.string.nav_history)) },
+                    icon = {
+                        Icon(
+                            imageVector = Icons.Default.History,
+                            contentDescription = stringResource(R.string.nav_history),
+                            tint = RoutePilotBlue
+                        )
+                    },
+                    label = { Text(stringResource(R.string.nav_history), fontWeight = FontWeight.Medium) },
                     selected = false,
                     onClick = {
                         scope.launch { drawerState.close() }
@@ -206,7 +225,14 @@ fun HomeScreen(
                     modifier = Modifier.padding(horizontal = 12.dp)
                 )
                 NavigationDrawerItem(
-                    label = { Text(stringResource(R.string.nav_settings)) },
+                    icon = {
+                        Icon(
+                            imageVector = Icons.Default.Settings,
+                            contentDescription = stringResource(R.string.nav_settings),
+                            tint = Color(0xFF475569)
+                        )
+                    },
+                    label = { Text(stringResource(R.string.nav_settings), fontWeight = FontWeight.Medium) },
                     selected = false,
                     onClick = {
                         scope.launch { drawerState.close() }
@@ -215,7 +241,14 @@ fun HomeScreen(
                     modifier = Modifier.padding(horizontal = 12.dp)
                 )
                 NavigationDrawerItem(
-                    label = { Text(stringResource(R.string.nav_profile)) },
+                    icon = {
+                        Icon(
+                            imageVector = Icons.Default.Person,
+                            contentDescription = stringResource(R.string.nav_profile),
+                            tint = RoutePilotNavy
+                        )
+                    },
+                    label = { Text(stringResource(R.string.nav_profile), fontWeight = FontWeight.Medium) },
                     selected = false,
                     onClick = {
                         scope.launch { drawerState.close() }
@@ -270,23 +303,13 @@ fun HomeScreen(
                         )
                     )
 
-                    Surface(
-                        shape = CircleShape,
-                        color = RoutePilotBlueLight,
-                        modifier = Modifier
-                            .size(38.dp)
-                            .clickable(onClick = onNavigateProfile)
-                            .testTag("home_profile_button")
-                    ) {
-                        Box(contentAlignment = Alignment.Center) {
-                            Icon(
-                                imageVector = Icons.Default.Person,
-                                contentDescription = stringResource(R.string.nav_profile),
-                                tint = RoutePilotBlue,
-                                modifier = Modifier.size(22.dp)
-                            )
-                        }
-                    }
+                    com.example.ui.components.UserProfileAvatar(
+                        size = 38.dp,
+                        userName = currentUser?.name.orEmpty(),
+                        showEditBadge = false,
+                        onClick = onNavigateProfile,
+                        modifier = Modifier.testTag("home_profile_button")
+                    )
                 }
 
                 Spacer(modifier = Modifier.height(4.dp))
@@ -367,7 +390,8 @@ fun HomeScreen(
                 Spacer(modifier = Modifier.height(12.dp))
 
                 // Live Corridor Safety Status Strip
-                val effectiveHazardsCount = activeHazards.count { it.isEffectiveHazard }
+                val effectiveHazards = activeHazards.filter { it.isEffectiveHazard }
+                val effectiveHazardsCount = effectiveHazards.size
                 Surface(
                     shape = RoundedCornerShape(12.dp),
                     color = if (effectiveHazardsCount > 0) Color(0xFFFFF3E0) else Color(0xFFE8F8EE),
@@ -395,6 +419,38 @@ fun HomeScreen(
                                 fontSize = 13.sp
                             )
                         )
+                    }
+                }
+
+                if (effectiveHazards.isNotEmpty()) {
+                    Spacer(modifier = Modifier.height(8.dp))
+                    effectiveHazards.take(2).forEach { hazard ->
+                        Surface(
+                            shape = RoundedCornerShape(12.dp),
+                            color = Color(0xFFFFEBEE),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(bottom = 6.dp)
+                        ) {
+                            Column(
+                                modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp)
+                            ) {
+                                Text(
+                                    text = "⚠️ ${hazard.name} • ${hazard.status.name.replace('_', ' ')}",
+                                    style = MaterialTheme.typography.labelLarge.copy(
+                                        color = HazardRed,
+                                        fontWeight = FontWeight.Bold
+                                    )
+                                )
+                                Text(
+                                    text = "${hazard.type.displayName} (${hazard.severity.name})${if (hazard.description.isNotBlank()) " — ${hazard.description}" else ""}",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = Color(0xFF7F1D1D),
+                                    maxLines = 2,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                            }
+                        }
                     }
                 }
 
@@ -557,6 +613,13 @@ fun HomeScreen(
                 }
             }
         }
+    }
+
+    if (showChangeAvatarDialog) {
+        com.example.ui.components.ChangeProfilePhotoDialog(
+            userName = currentUser?.name.orEmpty(),
+            onDismiss = { showChangeAvatarDialog = false }
+        )
     }
 
     // "See All" Modal Bottom Sheet showing ALL visited destinations with individual & Clear All delete

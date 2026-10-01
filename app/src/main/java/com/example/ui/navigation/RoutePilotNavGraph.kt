@@ -4,6 +4,7 @@ import android.Manifest
 import android.content.Context
 import android.content.res.Configuration
 import android.os.Build
+import androidx.activity.compose.LocalActivityResultRegistryOwner
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
@@ -62,6 +63,7 @@ fun RoutePilotAppRoot(
 ) {
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
     val baseContext = LocalContext.current
+    val activityResultRegistryOwner = LocalActivityResultRegistryOwner.current
 
     val localizedContext = remember(baseContext, uiState.preferences.languageCode) {
         createLocalizedContext(baseContext, uiState.preferences.languageCode)
@@ -73,7 +75,18 @@ fun RoutePilotAppRoot(
         viewModel.refreshDeviceLocationStatus()
     }
 
-    CompositionLocalProvider(LocalContext provides localizedContext) {
+    val compositionProviders = remember(localizedContext, activityResultRegistryOwner) {
+        if (activityResultRegistryOwner != null) {
+            arrayOf(
+                LocalContext provides localizedContext,
+                LocalActivityResultRegistryOwner provides activityResultRegistryOwner
+            )
+        } else {
+            arrayOf(LocalContext provides localizedContext)
+        }
+    }
+
+    CompositionLocalProvider(*compositionProviders) {
         Box(modifier = Modifier.fillMaxSize()) {
             NavHost(
                 navController = navController,
@@ -156,6 +169,7 @@ fun RoutePilotAppRoot(
                         activeHazards = uiState.activeHazards,
                         onToggleOperatingMode = { },
                         onOpenDestinationSearch = {
+                            viewModel.openDestinationSearchAtCurrentLocation()
                             navController.navigate(RoutePilotRoutes.SELECT_DESTINATION)
                         },
                         onSelectQuickCategory = { category ->
@@ -198,6 +212,9 @@ fun RoutePilotAppRoot(
                         hasLocationPermission = uiState.hasLocationPermission,
                         useKilometers = uiState.preferences.useKilometers,
                         onSearchQueryChange = viewModel::updateSearchQuery,
+                        onSearchSubmit = viewModel::submitPlaceSearch,
+                        onSelectCategoryChip = viewModel::submitPlaceSearch,
+                        onUseCurrentLocation = viewModel::openDestinationSearchAtCurrentLocation,
                         onSelectPlaceSuggestion = viewModel::selectDestinationCandidate,
                         onMapClickLocation = viewModel::selectPointOnMap,
                         onConfirmDestination = {

@@ -152,8 +152,10 @@ fun attemptAutoSignIn(
                 val googleIdTokenCredential = GoogleIdTokenCredential.createFrom(credential.data)
                 val googleIdToken = googleIdTokenCredential.idToken
                 val authCredential = GoogleAuthProvider.getCredential(googleIdToken, null)
-                val authResult = Firebase.auth.signInWithCredential(authCredential).await()
-                val fbUser = authResult.user
+                val authResult = runCatching {
+                    Firebase.auth.signInWithCredential(authCredential).await()
+                }.getOrNull()
+                val fbUser = authResult?.user
                 val resolvedEmail = fbUser?.email?.takeIf { it.isNotBlank() } ?: googleIdTokenCredential.id
                 val resolvedName = fbUser?.displayName?.takeIf { it.isNotBlank() }
                     ?: googleIdTokenCredential.displayName.orEmpty()
@@ -202,8 +204,10 @@ fun onGoogleSignInClicked(
                 val googleIdTokenCredential = GoogleIdTokenCredential.createFrom(credential.data)
                 val googleIdToken = googleIdTokenCredential.idToken
                 val authCredential = GoogleAuthProvider.getCredential(googleIdToken, null)
-                val authResult = Firebase.auth.signInWithCredential(authCredential).await()
-                val fbUser = authResult.user
+                val authResult = runCatching {
+                    Firebase.auth.signInWithCredential(authCredential).await()
+                }.getOrNull()
+                val fbUser = authResult?.user
                 val resolvedEmail = fbUser?.email?.takeIf { it.isNotBlank() } ?: googleIdTokenCredential.id
                 val resolvedName = fbUser?.displayName?.takeIf { it.isNotBlank() }
                     ?: googleIdTokenCredential.displayName.orEmpty()

@@ -6,6 +6,7 @@ import androidx.credentials.ClearCredentialStateRequest
 import androidx.credentials.CredentialManager
 import com.example.R
 import com.example.data.remote.OperationType
+import com.example.data.remote.UserConsoleFirestoreBridge
 import com.example.data.remote.handleFirestoreError
 import com.example.domain.model.User
 import com.example.domain.repository.AuthRepository
@@ -27,7 +28,6 @@ import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.tasks.await
 import org.json.JSONObject
 import java.util.Locale
-import java.util.UUID
 
 class AuthRepositoryImpl(
     private val context: Context,
@@ -137,29 +137,73 @@ class AuthRepositoryImpl(
             return Result.failure(IllegalArgumentException("Password must be at least 6 characters."))
         }
 
+        // 1. Check local account first for fast verification
         val localAccount = getLocalAccount(cleanEmail)
-            ?: return Result.failure(
-                IllegalArgumentException("No account found for $cleanEmail. Please Sign Up or Continue with Google.")
-            )
+        if (localAccount != null) {
+            val storedPassword = localAccount.optString("password", "")
+            if (storedPassword == password) {
+                val localUid = localAccount.optString("uid", "usr_${cleanEmail.hashCode().toUInt()}")
+                val localName = localAccount.optString(
+                    "name",
+                    cleanEmail.substringBefore("@").replaceFirstChar { it.uppercase() }
+                )
+                val remoteResult = runCatching {
+                    UserConsoleFirestoreBridge.loginEmailPasswordUser(
+                        email = cleanEmail,
+                        password = password,
+                        preferredName = localName
+                    ).getOrNull()
+                }.getOrNull()
 
-        val storedPassword = localAccount.optString("password", "")
-        if (storedPassword != password) {
-            return Result.failure(
-                IllegalArgumentException("Incorrect password. Please try again or tap Forgot Password.")
-            )
+                val resolvedUid = remoteResult?.uid?.takeIf { it.isNotBlank() } ?: localUid
+                val resolvedName = remoteResult?.name?.takeIf { it.isNotBlank() } ?: localName
+
+                saveLocalAccount(
+                    uid = resolvedUid,
+                    name = resolvedName,
+                    email = cleanEmail,
+                    password = password
+                )
+                setActiveSession(if (rememberMe) cleanEmail else null)
+                val user = User(
+                    id = resolvedUid,
+                    name = resolvedName,
+                    email = cleanEmail
+                )
+                _currentUser.value = user
+                return Result.success(user)
+            }
         }
 
-        val user = User(
-            id = localAccount.optString("uid", "usr_${cleanEmail.hashCode().toUInt()}"),
-            name = localAccount.optString(
-                "name",
-                cleanEmail.substringBefore("@").replaceFirstChar { it.uppercase() }
-            ),
-            email = cleanEmail
+        // 2. Verify against Firebase Authentication REST API & Firestore `users` collection
+        val remoteAuth = UserConsoleFirestoreBridge.loginEmailPasswordUser(cleanEmail, password)
+        return remoteAuth.fold(
+            onSuccess = { consoleUser ->
+                saveLocalAccount(
+                    uid = consoleUser.uid,
+                    name = consoleUser.name,
+                    email = consoleUser.email,
+                    password = password
+                )
+                setActiveSession(if (rememberMe) cleanEmail else null)
+                val user = User(
+                    id = consoleUser.uid,
+                    name = consoleUser.name,
+                    email = consoleUser.email
+                )
+                _currentUser.value = user
+                Result.success(user)
+            },
+            onFailure = { err ->
+                if (localAccount != null) {
+                    Result.failure(
+                        IllegalArgumentException("Incorrect password. Please try again or tap Forgot Password.")
+                    )
+                } else {
+                    Result.failure(err)
+                }
+            }
         )
-        setActiveSession(if (rememberMe) cleanEmail else null)
-        _currentUser.value = user
-        return Result.success(user)
     }
 
     override suspend fun signUpWithEmail(
@@ -181,27 +225,40 @@ class AuthRepositoryImpl(
             return Result.failure(IllegalArgumentException("Password must be at least 6 characters."))
         }
 
-        if (getLocalAccount(cleanEmail) != null) {
+        val existingLocal = getLocalAccount(cleanEmail)
+        if (existingLocal != null && existingLocal.optString("password") != "google_oauth_user") {
             return Result.failure(
                 IllegalArgumentException("An account with $cleanEmail already exists. Please Login instead.")
             )
         }
 
-        val uid = "usr_${UUID.randomUUID().toString().replace("-", "").take(12)}"
-        saveLocalAccount(
-            uid = uid,
+        val remoteSignUp = UserConsoleFirestoreBridge.registerEmailPasswordUser(
             name = cleanName,
             email = cleanEmail,
             password = password
         )
-        setActiveSession(cleanEmail)
-        val newUser = User(
-            id = uid,
-            name = cleanName,
-            email = cleanEmail
+
+        return remoteSignUp.fold(
+            onSuccess = { consoleUser ->
+                saveLocalAccount(
+                    uid = consoleUser.uid,
+                    name = consoleUser.name,
+                    email = consoleUser.email,
+                    password = password
+                )
+                setActiveSession(cleanEmail)
+                val newUser = User(
+                    id = consoleUser.uid,
+                    name = consoleUser.name,
+                    email = consoleUser.email
+                )
+                _currentUser.value = newUser
+                Result.success(newUser)
+            },
+            onFailure = { err ->
+                Result.failure(err)
+            }
         )
-        _currentUser.value = newUser
-        return Result.success(newUser)
     }
 
     override suspend fun continueWithGoogle(
@@ -212,8 +269,12 @@ class AuthRepositoryImpl(
         return try {
             val auth = firebaseAuth
             if (!idToken.isNullOrBlank() && auth != null && auth.currentUser == null) {
-                val authCredential = GoogleAuthProvider.getCredential(idToken, null)
-                auth.signInWithCredential(authCredential).await()
+                runCatching {
+                    val authCredential = GoogleAuthProvider.getCredential(idToken, null)
+                    auth.signInWithCredential(authCredential).await()
+                }.onFailure { e ->
+                    Log.w("AuthRepository", "Firebase signInWithCredential warning: ${e.message}")
+                }
             }
 
             val fbUser = auth?.currentUser
@@ -235,7 +296,7 @@ class AuthRepositoryImpl(
                         .ifBlank { "Google User" }
             }.trim()
 
-            val uid = fbUser?.uid?.takeIf { it.isNotBlank() }
+            val fallbackUid = fbUser?.uid?.takeIf { it.isNotBlank() }
                 ?: existingLocal?.optString("uid")?.takeIf { it.isNotBlank() }
                 ?: "google_usr_${resolvedEmail.hashCode().toUInt()}"
 
@@ -248,8 +309,21 @@ class AuthRepositoryImpl(
                 )
             }
 
+            val consoleResult = runCatching {
+                UserConsoleFirestoreBridge.signInWithGoogleIdToken(
+                    idToken = idToken,
+                    email = resolvedEmail,
+                    name = resolvedName,
+                    fallbackUid = fallbackUid
+                )
+            }.getOrNull()
+
+            val finalUid = consoleResult?.uid?.takeIf { it.isNotBlank() }
+                ?: fbUser?.uid?.takeIf { it.isNotBlank() }
+                ?: fallbackUid
+
             saveLocalAccount(
-                uid = uid,
+                uid = finalUid,
                 name = resolvedName,
                 email = resolvedEmail,
                 password = existingLocal?.optString("password")?.takeIf { it.isNotBlank() } ?: "google_oauth_user"
@@ -257,7 +331,7 @@ class AuthRepositoryImpl(
             setActiveSession(resolvedEmail)
 
             val user = User(
-                id = uid,
+                id = finalUid,
                 name = resolvedName,
                 email = resolvedEmail
             )
@@ -266,6 +340,29 @@ class AuthRepositoryImpl(
         } catch (e: Exception) {
             Log.e("AuthRepository", "Google Sign-In failed", e)
             Result.failure(e)
+        }
+    }
+
+    suspend fun syncCurrentSessionToConsoleIfPresent() {
+        val current = _currentUser.value ?: return
+        val local = getLocalAccount(current.email)
+        val storedPwd = local?.optString("password")
+        val synced = runCatching {
+            UserConsoleFirestoreBridge.ensureSessionSyncedToConsole(
+                uid = current.id,
+                name = current.name,
+                email = current.email,
+                password = storedPwd
+            )
+        }.getOrNull()
+        if (synced != null && synced.uid.isNotBlank() && synced.uid != current.id) {
+            saveLocalAccount(
+                uid = synced.uid,
+                name = current.name,
+                email = current.email,
+                password = storedPwd ?: "google_oauth_user"
+            )
+            _currentUser.value = current.copy(id = synced.uid)
         }
     }
 
@@ -278,32 +375,41 @@ class AuthRepositoryImpl(
             return Result.failure(IllegalArgumentException("Please enter your registered email address."))
         }
 
-        val auth = firebaseAuth
-        if (auth != null && newPassword.isNullOrBlank()) {
-            return runCatching {
-                auth.sendPasswordResetEmail(cleanEmail).await()
-                "Password reset email sent to $cleanEmail via Firebase Authentication."
-            }
+        if (!newPassword.isNullOrBlank() && newPassword.length < 6) {
+            return Result.failure(
+                IllegalArgumentException("New password must be at least 6 characters.")
+            )
         }
 
-        val existing = getLocalAccount(cleanEmail)
-            ?: return Result.failure(
-                IllegalArgumentException("No registered account found for $cleanEmail. Please Sign Up first.")
-            )
+        val existingLocal = getLocalAccount(cleanEmail)
+        val resetOnConsole = runCatching {
+            UserConsoleFirestoreBridge.resetUserPassword(cleanEmail, newPassword)
+        }.getOrDefault(false)
 
         if (!newPassword.isNullOrBlank()) {
-            if (newPassword.length < 6) {
-                return Result.failure(
-                    IllegalArgumentException("New password must be at least 6 characters.")
-                )
-            }
+            val uid = existingLocal?.optString("uid") ?: "usr_${cleanEmail.hashCode().toUInt()}"
+            val name = existingLocal?.optString("name")
+                ?: cleanEmail.substringBefore("@").replaceFirstChar { it.uppercase() }
             saveLocalAccount(
-                uid = existing.optString("uid", "usr_${cleanEmail.hashCode().toUInt()}"),
-                name = existing.optString("name", cleanEmail.substringBefore("@")),
+                uid = uid,
+                name = name,
                 email = cleanEmail,
                 password = newPassword
             )
             return Result.success("Password for $cleanEmail has been updated. You can now Login with your new password.")
+        }
+
+        val auth = firebaseAuth
+        if (auth != null) {
+            runCatching {
+                auth.sendPasswordResetEmail(cleanEmail).await()
+            }
+        }
+
+        if (existingLocal == null && !resetOnConsole) {
+            return Result.failure(
+                IllegalArgumentException("No registered account found for $cleanEmail. Please Sign Up first.")
+            )
         }
 
         return Result.success("Password reset link sent to $cleanEmail.")

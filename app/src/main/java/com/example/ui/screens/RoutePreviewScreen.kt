@@ -92,6 +92,7 @@ fun RoutePreviewScreen(
     onBack: () -> Unit
 ) {
     var isMapExpanded by remember { mutableStateOf(false) }
+    var dismissedPreviewHazardKey by remember { mutableStateOf<String?>(null) }
 
     val activeRoute = recommendedRoute
     val selectedDistText = activeRoute?.let { GeoUtils.formatDistance(it.totalDistanceMeters, useKilometers) } ?: "18.4 km"
@@ -100,15 +101,20 @@ fun RoutePreviewScreen(
 
     val hazardOnCurrentPath = activeHazards.firstOrNull { it.isEffectiveHazard }
     val isAlreadyDiverted = activeRoute?.isDivertedForSafety == true
+    val currentHazardKey = hazardOnCurrentPath?.let { "${it.id}_${it.status}_${it.severity}" }
 
-    Column(
+    Box(
         modifier = Modifier
             .fillMaxSize()
             .background(SurfaceBackground)
-            .windowInsetsPadding(WindowInsets.statusBars)
-            .windowInsetsPadding(WindowInsets.navigationBars)
-            .padding(horizontal = 12.dp)
     ) {
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .windowInsetsPadding(WindowInsets.statusBars)
+                .windowInsetsPadding(WindowInsets.navigationBars)
+                .padding(horizontal = 12.dp)
+        ) {
         // Compact Header + Origin -> Destination Pill
         Row(
             modifier = Modifier
@@ -423,5 +429,177 @@ fun RoutePreviewScreen(
         }
 
         Spacer(modifier = Modifier.height(6.dp))
+        }
+
+        // Popup asking user whether to Find Other Route or Cancel when Admin generates a hazard
+        if (hazardOnCurrentPath != null && !isAlreadyDiverted && currentHazardKey != dismissedPreviewHazardKey) {
+            val statusLabel = when (hazardOnCurrentPath.status) {
+                HazardStatus.BLOCKED -> stringResource(R.string.status_road_blocked)
+                HazardStatus.PARTIALLY_BLOCKED -> stringResource(R.string.status_partially_blocked)
+                else -> stringResource(R.string.status_warning)
+            }
+            val descText = hazardOnCurrentPath.description.ifBlank {
+                "Hazard reported ahead on ${hazardOnCurrentPath.name} ($statusLabel). Continuing on this route may be unsafe."
+            }
+
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(Color.Black.copy(alpha = 0.52f))
+                    .padding(horizontal = 20.dp),
+                contentAlignment = Alignment.Center
+            ) {
+                Card(
+                    shape = RoundedCornerShape(24.dp),
+                    colors = CardDefaults.cardColors(containerColor = Color.White),
+                    elevation = CardDefaults.cardElevation(defaultElevation = 14.dp),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("preview_hazard_popup_card")
+                ) {
+                    Column(modifier = Modifier.padding(20.dp)) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Icon(
+                                imageVector = Icons.Default.Warning,
+                                contentDescription = null,
+                                tint = HazardRed,
+                                modifier = Modifier.size(30.dp)
+                            )
+                            Spacer(modifier = Modifier.width(10.dp))
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = "Hazard Detected on Route!",
+                                    style = MaterialTheme.typography.titleMedium.copy(
+                                        fontWeight = FontWeight.ExtraBold,
+                                        color = HazardRed,
+                                        fontSize = 18.sp
+                                    )
+                                )
+                                Text(
+                                    text = "${hazardOnCurrentPath.name} • ${hazardOnCurrentPath.type.displayName}",
+                                    style = MaterialTheme.typography.bodyMedium.copy(
+                                        fontWeight = FontWeight.Bold,
+                                        color = Color(0xFF0F172A)
+                                    )
+                                )
+                            }
+                        }
+
+                        Spacer(modifier = Modifier.height(10.dp))
+
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Surface(
+                                shape = RoundedCornerShape(50),
+                                color = HazardRed
+                            ) {
+                                Text(
+                                    text = hazardOnCurrentPath.severity.name,
+                                    style = MaterialTheme.typography.labelSmall.copy(
+                                        color = Color.White,
+                                        fontWeight = FontWeight.Bold
+                                    ),
+                                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp)
+                                )
+                            }
+                            Surface(
+                                shape = RoundedCornerShape(50),
+                                color = Color(0xFFFFEBEE)
+                            ) {
+                                Text(
+                                    text = statusLabel,
+                                    style = MaterialTheme.typography.labelSmall.copy(
+                                        color = HazardRed,
+                                        fontWeight = FontWeight.Bold
+                                    ),
+                                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp)
+                                )
+                            }
+                        }
+
+                        Spacer(modifier = Modifier.height(12.dp))
+
+                        Surface(
+                            shape = RoundedCornerShape(14.dp),
+                            color = Color(0xFFFFF5F5),
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Column(modifier = Modifier.padding(12.dp)) {
+                                Text(
+                                    text = "Hazard Description:",
+                                    style = MaterialTheme.typography.labelMedium.copy(
+                                        fontWeight = FontWeight.Bold,
+                                        color = Color(0xFF991B1B)
+                                    )
+                                )
+                                Spacer(modifier = Modifier.height(4.dp))
+                                Text(
+                                    text = descText,
+                                    style = MaterialTheme.typography.bodyMedium.copy(
+                                        color = Color(0xFF1E293B),
+                                        fontSize = 13.sp
+                                    )
+                                )
+                            }
+                        }
+
+                        Spacer(modifier = Modifier.height(12.dp))
+
+                        Text(
+                            text = "Would you like to find another safer route to avoid this hazard?",
+                            style = MaterialTheme.typography.bodyMedium.copy(
+                                color = Color(0xFF475569),
+                                fontWeight = FontWeight.SemiBold,
+                                fontSize = 13.sp
+                            )
+                        )
+
+                        Spacer(modifier = Modifier.height(14.dp))
+
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(10.dp)
+                        ) {
+                            Surface(
+                                shape = RoundedCornerShape(12.dp),
+                                color = Color.White,
+                                border = BorderStroke(1.dp, Color(0xFFCBD5E1)),
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .height(46.dp)
+                                    .clickable { dismissedPreviewHazardKey = currentHazardKey }
+                                    .testTag("preview_popup_cancel_button")
+                            ) {
+                                Box(contentAlignment = Alignment.Center) {
+                                    Text(
+                                        text = stringResource(R.string.action_cancel),
+                                        fontWeight = FontWeight.Bold,
+                                        color = Color(0xFF475569)
+                                    )
+                                }
+                            }
+
+                            Button(
+                                onClick = {
+                                    dismissedPreviewHazardKey = currentHazardKey
+                                    onChooseOtherPath()
+                                },
+                                shape = RoundedCornerShape(12.dp),
+                                colors = ButtonDefaults.buttonColors(containerColor = RoutePilotBlue),
+                                modifier = Modifier
+                                    .weight(1.3f)
+                                    .height(46.dp)
+                                    .testTag("preview_popup_find_route_button")
+                            ) {
+                                Text(
+                                    text = "Find Other Route",
+                                    fontWeight = FontWeight.Bold,
+                                    color = Color.White
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 }

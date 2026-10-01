@@ -170,8 +170,7 @@ fun LiveNavigationScreen(
                                 HazardSeverity.LOW -> "Low"
                             }
                             HazardDetectedTopBanner(
-                                subtitle = "$hzName - $severityWord Hazard",
-                                onClick = onTriggerRerouteNow
+                                subtitle = "$hzName - $severityWord Hazard"
                             )
                         }
 
@@ -189,7 +188,7 @@ fun LiveNavigationScreen(
                     }
                 }
 
-                // Bottom Card Overlay (Screen 7 Bridge B1 Hazard Card / Screen 9 Remaining & ETA Card)
+                // Bottom Card Overlay
                 Box(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -197,20 +196,29 @@ fun LiveNavigationScreen(
                         .windowInsetsPadding(WindowInsets.navigationBars)
                         .padding(horizontal = 12.dp, vertical = 10.dp)
                 ) {
-                    if (isHazardDetected) {
+                    val displayEtaMinutes = max(1, (remainingEtaSeconds + 30) / 60)
+                    NavigationBottomSummaryCard(
+                        remainingDistanceText = GeoUtils.formatDistance(remainingDistanceMeters, useKilometers),
+                        remainingSubtitleText = stringResource(R.string.label_remaining),
+                        etaText = "$displayEtaMinutes min",
+                        onEndNavigation = onEndNavigation
+                    )
+                }
+
+                // Interactive Hazard Detected Popup Modal asking user whether to Find Other Route or Cancel
+                if (isHazardDetected) {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .background(Color.Black.copy(alpha = 0.52f))
+                            .padding(horizontal = 18.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
                         HazardAlertBottomCard(
                             hazard = primaryAffectingHazard,
                             useKilometers = useKilometers,
                             onDismiss = onDismissHazardAlert,
                             onFindSaferRoute = onTriggerRerouteNow
-                        )
-                    } else {
-                        val displayEtaMinutes = max(1, (remainingEtaSeconds + 30) / 60)
-                        NavigationBottomSummaryCard(
-                            remainingDistanceText = GeoUtils.formatDistance(remainingDistanceMeters, useKilometers),
-                            remainingSubtitleText = stringResource(R.string.label_remaining),
-                            etaText = "$displayEtaMinutes min",
-                            onEndNavigation = onEndNavigation
                         )
                     }
                 }
@@ -427,16 +435,18 @@ private fun HazardAlertBottomCard(
         HazardStatus.CLEARED -> stringResource(R.string.status_cleared)
     }
 
+    val descriptionText = hazard?.description?.takeIf { it.isNotBlank() }
+        ?: "Structural hazard reported ahead on $hazardName ($statusText). Continuing on this route may be unsafe."
+
     Card(
-        shape = RoundedCornerShape(22.dp),
+        shape = RoundedCornerShape(24.dp),
         colors = CardDefaults.cardColors(containerColor = Color.White),
-        elevation = CardDefaults.cardElevation(defaultElevation = 10.dp),
+        elevation = CardDefaults.cardElevation(defaultElevation = 14.dp),
         modifier = Modifier
             .fillMaxWidth()
-            .clickable { onFindSaferRoute() }
             .testTag("hazard_alert_bottom_card")
     ) {
-        Column(modifier = Modifier.padding(16.dp)) {
+        Column(modifier = Modifier.padding(20.dp)) {
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 verticalAlignment = Alignment.CenterVertically
@@ -446,7 +456,7 @@ private fun HazardAlertBottomCard(
                     contentDescription = hazardName,
                     contentScale = ContentScale.Crop,
                     modifier = Modifier
-                        .size(94.dp)
+                        .size(86.dp)
                         .clip(RoundedCornerShape(14.dp))
                 )
 
@@ -463,8 +473,9 @@ private fun HazardAlertBottomCard(
                             style = MaterialTheme.typography.titleLarge.copy(
                                 fontWeight = FontWeight.ExtraBold,
                                 color = Color(0xFF0F172A),
-                                fontSize = 19.sp
-                            )
+                                fontSize = 18.sp
+                            ),
+                            modifier = Modifier.weight(1f)
                         )
                         IconButton(
                             onClick = onDismiss,
@@ -483,41 +494,119 @@ private fun HazardAlertBottomCard(
 
                     Spacer(modifier = Modifier.height(4.dp))
 
-                    Surface(
-                        shape = RoundedCornerShape(50),
-                        color = severityBadgeColor
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
+                        Surface(
+                            shape = RoundedCornerShape(50),
+                            color = severityBadgeColor
+                        ) {
+                            Text(
+                                text = severityLabel,
+                                style = MaterialTheme.typography.labelMedium.copy(
+                                    color = Color.White,
+                                    fontWeight = FontWeight.Bold,
+                                    fontSize = 12.sp
+                                ),
+                                modifier = Modifier.padding(horizontal = 10.dp, vertical = 3.dp)
+                            )
+                        }
                         Text(
-                            text = severityLabel,
-                            style = MaterialTheme.typography.labelMedium.copy(
-                                color = Color.White,
-                                fontWeight = FontWeight.Bold,
-                                fontSize = 12.sp
-                            ),
-                            modifier = Modifier.padding(horizontal = 12.dp, vertical = 3.dp)
+                            text = statusText,
+                            style = MaterialTheme.typography.bodyMedium.copy(
+                                fontWeight = FontWeight.ExtraBold,
+                                color = Color(0xFFEA2828),
+                                fontSize = 13.sp
+                            )
                         )
                     }
 
-                    Spacer(modifier = Modifier.height(6.dp))
+                    Spacer(modifier = Modifier.height(4.dp))
 
                     Text(
-                        text = distanceAheadText,
+                        text = "${hazard?.type?.displayName ?: "Bridge Hazard"} • $distanceAheadText",
                         style = MaterialTheme.typography.bodyMedium.copy(
                             color = Color(0xFF334155),
                             fontWeight = FontWeight.Medium,
-                            fontSize = 14.sp
+                            fontSize = 13.sp
                         )
                     )
+                }
+            }
 
-                    Spacer(modifier = Modifier.height(2.dp))
+            Spacer(modifier = Modifier.height(14.dp))
 
+            // Hazard Description Box from Admin Panel
+            Surface(
+                shape = RoundedCornerShape(14.dp),
+                color = Color(0xFFFFF5F5),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Column(modifier = Modifier.padding(12.dp)) {
                     Text(
-                        text = statusText,
-                        style = MaterialTheme.typography.bodyLarge.copy(
-                            fontWeight = FontWeight.ExtraBold,
-                            color = Color(0xFF0F172A),
-                            fontSize = 15.sp
+                        text = "Hazard Description:",
+                        style = MaterialTheme.typography.labelMedium.copy(
+                            fontWeight = FontWeight.Bold,
+                            color = Color(0xFF991B1B)
                         )
+                    )
+                    Spacer(modifier = Modifier.height(4.dp))
+                    Text(
+                        text = descriptionText,
+                        style = MaterialTheme.typography.bodyMedium.copy(
+                            color = Color(0xFF1E293B),
+                            fontSize = 13.sp
+                        )
+                    )
+                }
+            }
+
+            Spacer(modifier = Modifier.height(12.dp))
+
+            Text(
+                text = "Would you like to find another safer route to avoid this hazard?",
+                style = MaterialTheme.typography.bodyMedium.copy(
+                    color = Color(0xFF475569),
+                    fontWeight = FontWeight.SemiBold,
+                    fontSize = 13.sp
+                )
+            )
+
+            Spacer(modifier = Modifier.height(14.dp))
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                OutlinedButton(
+                    onClick = onDismiss,
+                    shape = RoundedCornerShape(12.dp),
+                    modifier = Modifier
+                        .weight(1f)
+                        .height(48.dp)
+                        .testTag("cancel_hazard_popup_button")
+                ) {
+                    Text(
+                        text = stringResource(R.string.action_cancel),
+                        fontWeight = FontWeight.Bold,
+                        color = Color(0xFF475569)
+                    )
+                }
+
+                Button(
+                    onClick = onFindSaferRoute,
+                    shape = RoundedCornerShape(12.dp),
+                    colors = ButtonDefaults.buttonColors(containerColor = RoutePilotBlue),
+                    modifier = Modifier
+                        .weight(1.3f)
+                        .height(48.dp)
+                        .testTag("find_other_route_button")
+                ) {
+                    Text(
+                        text = "Find Other Route",
+                        fontWeight = FontWeight.Bold,
+                        color = Color.White
                     )
                 }
             }

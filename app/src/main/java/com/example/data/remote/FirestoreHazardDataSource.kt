@@ -69,7 +69,7 @@ class FirestoreHazardDataSource(
      */
     fun observeActiveHazardsRealtime(): Flow<List<Hazard>> = flow {
         val db = firestore
-        if (db == null) {
+        if (db == null || (providedFirestore == null && auth?.currentUser == null)) {
             emit(emptyList())
             return@flow
         }
@@ -99,6 +99,7 @@ class FirestoreHazardDataSource(
 
     suspend fun getHazardById(hazardId: String): Hazard? {
         val db = firestore ?: return null
+        if (providedFirestore == null && auth?.currentUser == null) return null
         val path = "hazards/$hazardId"
         return try {
             val doc = db.collection("hazards").document(hazardId).get().await()
@@ -106,6 +107,38 @@ class FirestoreHazardDataSource(
         } catch (e: Exception) {
             handleFirestoreError(e, OperationType.GET, path)
             null
+        }
+    }
+
+    suspend fun upsertHazardInFirestore(hazard: Hazard): Result<String> {
+        val db = firestore ?: return Result.failure(IllegalStateException("Firestore not initialized"))
+        val uid = requireUserId()
+        val hazardId = hazard.id.ifBlank { "hazard_${System.currentTimeMillis()}" }
+        val path = "hazards/$hazardId"
+        return try {
+            val payload = mutableMapOf<String, Any>(
+                "userId" to uid,
+                "name" to hazard.name.ifBlank { "Road / Bridge Hazard" }.take(150),
+                "type" to hazard.type.name,
+                "severity" to hazard.severity.name,
+                "status" to hazard.status.name,
+                "latitude" to hazard.latitude.coerceIn(-90.0, 90.0),
+                "longitude" to hazard.longitude.coerceIn(-180.0, 180.0),
+                "radius" to hazard.radiusMeters.coerceIn(1.0, 50000.0),
+                "description" to hazard.description.take(500),
+                "active" to hazard.active,
+                "source" to hazard.source.ifBlank { "ADMIN_BACKEND" }.take(50),
+                "createdAt" to FieldValue.serverTimestamp(),
+                "updatedAt" to FieldValue.serverTimestamp()
+            )
+            hazard.roadId?.takeIf { it.isNotBlank() }?.let { payload["roadId"] = it.take(100) }
+            hazard.bridgeId?.takeIf { it.isNotBlank() }?.let { payload["bridgeId"] = it.take(100) }
+
+            db.collection("hazards").document(hazardId).set(payload).await()
+            Result.success(hazardId)
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.CREATE, path)
+            Result.failure(e)
         }
     }
 

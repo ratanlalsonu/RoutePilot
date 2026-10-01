@@ -143,6 +143,11 @@ class RoutePilotViewModel(
         observePreferencesAndData()
         observeAuthentication()
         refreshDeviceLocationStatus()
+        viewModelScope.launch {
+            runCatching {
+                com.example.data.remote.UserConsoleFirestoreBridge.seedRequiredCollectionsIfNeeded()
+            }
+        }
     }
 
     private fun checkMapsApiKeyConfigured(): Boolean {
@@ -183,10 +188,56 @@ class RoutePilotViewModel(
                 _uiState.update { it.copy(currentUser = user) }
                 if (user != null) {
                     observeRealtimeHazards()
+                    viewModelScope.launch {
+                        runCatching {
+                            (authRepository as? com.example.data.repository.AuthRepositoryImpl)
+                                ?.syncCurrentSessionToConsoleIfPresent()
+                                ?: com.example.data.remote.UserConsoleFirestoreBridge.ensureSessionSyncedToConsole(
+                                    uid = user.id,
+                                    name = user.name,
+                                    email = user.email,
+                                    password = null
+                                )
+                        }
+                    }
                 } else {
                     hazardSubscriptionJob?.cancel()
                     hazardSubscriptionJob = null
                 }
+            }
+        }
+    }
+
+    private var lastTelemetrySyncMs: Long = 0L
+
+    private fun pushLiveTelemetryToConsole(force: Boolean = false) {
+        val now = System.currentTimeMillis()
+        if (!force && now - lastTelemetrySyncMs < 5000L) return
+        lastTelemetrySyncMs = now
+        val state = _uiState.value
+        val activeRoute = state.activeRoute ?: state.recommendedRoute
+        val sampledPts = activeRoute?.points.orEmpty().let { pts ->
+            if (pts.size <= 30) pts else pts.filterIndexed { i, _ -> i % (pts.size / 25).coerceAtLeast(1) == 0 || i == pts.lastIndex }
+        }
+        val routeJson = sampledPts.joinToString(prefix = "[", postfix = "]") { pt ->
+            "{\"lat\":${pt.latitude},\"lng\":${pt.longitude}}"
+        }
+        viewModelScope.launch {
+            runCatching {
+                com.example.data.remote.UserConsoleFirestoreBridge.syncLiveDriverTelemetry(
+                    userId = state.currentUser?.id.orEmpty(),
+                    userName = state.currentUser?.name.orEmpty(),
+                    userEmail = state.currentUser?.email.orEmpty(),
+                    currentLat = state.currentLocation.latitude,
+                    currentLng = state.currentLocation.longitude,
+                    destinationName = (activeRoute?.destination ?: state.selectedDestination).name,
+                    destinationAddress = (activeRoute?.destination ?: state.selectedDestination).address,
+                    destLat = (activeRoute?.destination ?: state.selectedDestination).latitude,
+                    destLng = (activeRoute?.destination ?: state.selectedDestination).longitude,
+                    workflowState = state.workflowState.name,
+                    isDivertedForSafety = activeRoute?.isDivertedForSafety == true,
+                    routePointsJson = routeJson
+                )
             }
         }
     }
@@ -203,6 +254,9 @@ class RoutePilotViewModel(
                         ?: _uiState.value.activeRoute
                         ?: _uiState.value.recommendedRoute
                     val aligned = alignHazardsWithRoutePath(hazards, referenceRoute)
+                    handledHazardIdsForCurrentRoute.removeAll { key ->
+                        aligned.none { h -> key.startsWith("${h.id}_") }
+                    }
                     _uiState.update { it.copy(activeHazards = aligned) }
                     evaluateActiveNavigationAgainstHazards(aligned)
                 }
@@ -438,6 +492,7 @@ class RoutePilotViewModel(
 
         // 5. Re-check hazard impact at the new location
         evaluateActiveNavigationAgainstHazards(state.activeHazards)
+        pushLiveTelemetryToConsole(force = false)
     }
 
     private fun computeLiveTurnGuidance(
@@ -576,6 +631,7 @@ class RoutePilotViewModel(
             soundEnabled = prefs.alertSoundEnabled,
             voiceEnabled = prefs.navigationVoiceEnabled && !_uiState.value.isVoiceMutedInNav
         )
+        pushLiveTelemetryToConsole(force = true)
     }
 
     /**
@@ -679,6 +735,7 @@ class RoutePilotViewModel(
             hazardAlertService.announceRouteUpdated(
                 voiceEnabled = _uiState.value.preferences.navigationVoiceEnabled && !_uiState.value.isVoiceMutedInNav
             )
+            pushLiveTelemetryToConsole(force = true)
         }
     }
 
@@ -789,17 +846,93 @@ class RoutePilotViewModel(
     // Screen 3 & 4: Destination Search & Map Selection
     // ========================================================================
 
+    fun openDestinationSearchAtCurrentLocation() {
+        refreshDeviceLocationStatus()
+        val loc = _uiState.value.currentLocation
+        val currentLocDest = Destination(
+            id = "current_user_location",
+            name = "Your Current Location",
+            address = String.format(java.util.Locale.US, "Live GPS (%.4f, %.4f)", loc.latitude, loc.longitude),
+            latitude = loc.latitude,
+            longitude = loc.longitude,
+            category = "Current Location",
+            distanceFromUserKm = 0.0
+        )
+        _uiState.update {
+            it.copy(
+                searchQuery = "",
+                searchResults = emptyList(),
+                isSearchingPlaces = false,
+                selectedDestination = currentLocDest
+            )
+        }
+        viewModelScope.launch {
+            runCatching {
+                val geocoded = destinationRepository.reverseGeocode(loc)
+                if (_uiState.value.selectedDestination.id == "current_user_location") {
+                    _uiState.update { state ->
+                        state.copy(
+                            selectedDestination = currentLocDest.copy(
+                                address = geocoded.address.ifBlank { currentLocDest.address }
+                            )
+                        )
+                    }
+                }
+            }
+        }
+    }
+
     fun updateSearchQuery(query: String) {
+        if (query.isBlank()) {
+            searchDebounceJob?.cancel()
+            _uiState.update {
+                it.copy(
+                    searchQuery = "",
+                    searchResults = emptyList(),
+                    isSearchingPlaces = false
+                )
+            }
+            return
+        }
         _uiState.update { it.copy(searchQuery = query, isSearchingPlaces = true) }
         searchDebounceJob?.cancel()
         searchDebounceJob = viewModelScope.launch {
             delay(220L)
-            val res = destinationRepository.searchPlaces(query, _uiState.value.currentLocation)
+            val currentLoc = _uiState.value.currentLocation
+            val res = destinationRepository.searchPlaces(query, currentLoc)
             res.onSuccess { list ->
+                val localizedList = list.map { localizeDestinationToDriverRegion(it, currentLoc) }
                 _uiState.update {
                     it.copy(
-                        searchResults = list,
+                        searchResults = localizedList,
                         isSearchingPlaces = false
+                    )
+                }
+            }.onFailure {
+                _uiState.update { it.copy(isSearchingPlaces = false) }
+            }
+        }
+    }
+
+    fun submitPlaceSearch(query: String) {
+        val trimmed = query.trim()
+        if (trimmed.isBlank()) {
+            openDestinationSearchAtCurrentLocation()
+            return
+        }
+        _uiState.update { it.copy(searchQuery = trimmed, isSearchingPlaces = true) }
+        searchDebounceJob?.cancel()
+        searchDebounceJob = viewModelScope.launch {
+            val currentLoc = _uiState.value.currentLocation
+            val res = destinationRepository.searchPlaces(trimmed, currentLoc)
+            res.onSuccess { list ->
+                val localizedList = list.map { localizeDestinationToDriverRegion(it, currentLoc) }
+                val firstPlace = localizedList.firstOrNull()
+                _uiState.update { state ->
+                    state.copy(
+                        searchResults = localizedList,
+                        isSearchingPlaces = false,
+                        selectedDestination = firstPlace ?: state.selectedDestination
                     )
                 }
             }.onFailure {
@@ -950,6 +1083,7 @@ class RoutePilotViewModel(
                     )
                 }
                 onRouteReady()
+                pushLiveTelemetryToConsole(force = true)
             } else {
                 _uiState.update {
                     it.copy(
@@ -1025,6 +1159,7 @@ class RoutePilotViewModel(
 
         // Immediately evaluate any active backend/Firestore hazards on the selected route
         evaluateActiveNavigationAgainstHazards(_uiState.value.activeHazards)
+        pushLiveTelemetryToConsole(force = true)
     }
 
     fun dismissHazardAlertAndContinue() {

@@ -391,13 +391,26 @@ fun RoutePilotMapView(
         }
     }
 
-    // Center smoothly on a specific tapped Red Marker when the user selects a place on the map
-    LaunchedEffect(destination?.id, destination?.latitude, destination?.longitude) {
-        if (!isNavigationMode && primaryRoute == null && destination != null) {
+    // Center smoothly on the user's Current Location when SelectDestinationScreen opens (or on a tapped/searched destination)
+    LaunchedEffect(
+        destination?.id,
+        destination?.latitude,
+        destination?.longitude,
+        displayDriverLocation.latitude,
+        displayDriverLocation.longitude
+    ) {
+        if (!isNavigationMode && primaryRoute == null) {
             runCatching {
-                val targetZoom = max(cameraPositionState.position.zoom, 14.4f).coerceAtMost(16.5f)
+                val isCurrentUserLoc = destination == null || destination.id == "current_user_location"
+                val targetLat = if (isCurrentUserLoc) displayDriverLocation.latitude else destination!!.latitude
+                val targetLng = if (isCurrentUserLoc) displayDriverLocation.longitude else destination!!.longitude
+                val targetZoom = if (isCurrentUserLoc) {
+                    15.8f
+                } else {
+                    max(cameraPositionState.position.zoom, 14.8f).coerceAtMost(16.5f)
+                }
                 val camPos = CameraPosition.Builder()
-                    .target(LatLng(destination.latitude, destination.longitude))
+                    .target(LatLng(targetLat, targetLng))
                     .zoom(targetZoom)
                     .bearing(0f)
                     .tilt(0f)
@@ -732,7 +745,7 @@ fun RoutePilotMapView(
                             abs(it.longitude - destination.longitude) < 1e-5)
                 }
 
-            if (destination != null && !isDestinationInNearbyList) {
+            if (destination != null && destination.id != "current_user_location" && !isDestinationInNearbyList) {
                 if (!isNavigationMode && primaryRoute == null) {
                     Circle(
                         center = LatLng(destination.latitude, destination.longitude),
@@ -898,42 +911,6 @@ fun RoutePilotMapView(
                         )
                     }
                 }
-            }
-        }
-
-        // Unobstructed Satellite / Map Mode toggle pill at Top-Start (below top turn banner during navigation)
-        Surface(
-            shape = RoundedCornerShape(12.dp),
-            color = if (isSatelliteMode) RoutePilotBlue else Color.White.copy(alpha = 0.96f),
-            shadowElevation = 6.dp,
-            modifier = Modifier
-                .align(Alignment.TopStart)
-                .padding(
-                    start = 12.dp,
-                    top = if (isNavigationMode) 104.dp else 12.dp
-                )
-                .clickable { isSatelliteMode = !isSatelliteMode }
-                .testTag("map_mode_pill_toggle")
-        ) {
-            Row(
-                modifier = Modifier.padding(horizontal = 12.dp, vertical = 7.dp),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Icon(
-                    imageVector = if (isSatelliteMode) Icons.Default.SatelliteAlt else Icons.Default.Layers,
-                    contentDescription = null,
-                    tint = if (isSatelliteMode) Color.White else RoutePilotBlue,
-                    modifier = Modifier.size(16.dp)
-                )
-                Spacer(modifier = Modifier.width(6.dp))
-                Text(
-                    text = if (isSatelliteMode) "Satellite Mode ON" else "Satellite Mode",
-                    style = MaterialTheme.typography.labelMedium.copy(
-                        color = if (isSatelliteMode) Color.White else Color(0xFF0F172A),
-                        fontWeight = FontWeight.ExtraBold,
-                        fontSize = 12.sp
-                    )
-                )
             }
         }
     }

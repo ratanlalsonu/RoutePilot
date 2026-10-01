@@ -9,6 +9,7 @@ import com.example.domain.model.OperatingMode
 import com.example.domain.repository.HazardRepository
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.onEach
 
@@ -37,18 +38,24 @@ class HazardRepositoryImpl(
                     if (remoteList.isNotEmpty()) {
                         dao.upsertCachedHazards(remoteList.map { HazardCacheEntity.fromDomain(it) })
                     }
-                },
+                }
+                .catch { emit(emptyList()) },
+            com.example.data.remote.UserConsoleFirestoreBridge.observeActiveConsoleHazards()
+                .onEach { consoleList ->
+                    if (consoleList.isNotEmpty()) {
+                        dao.upsertCachedHazards(consoleList.map { HazardCacheEntity.fromDomain(it) })
+                    } else {
+                        dao.deleteStaleCachedHazards(Long.MAX_VALUE)
+                    }
+                }
+                .catch { emit(emptyList()) },
             dao.observeActiveCachedHazards()
-        ) { realtimeHazards, cachedEntities ->
-            if (realtimeHazards.isNotEmpty()) {
-                realtimeHazards.filter { it.isEffectiveHazard }
-            } else {
-                val minFreshTimestamp = System.currentTimeMillis() - CACHE_FRESHNESS_MS
-                cachedEntities
-                    .filter { it.cachedAtTimestamp >= minFreshTimestamp && it.source != "DEMO" }
-                    .map { it.toDomain() }
-                    .filter { it.isEffectiveHazard }
-            }
+        ) { realtimeHazards, consoleHazards, _ ->
+            (realtimeHazards + consoleHazards)
+                .associateBy { it.id }
+                .values
+                .filter { it.isEffectiveHazard }
+                .toList()
         }
     }
 
