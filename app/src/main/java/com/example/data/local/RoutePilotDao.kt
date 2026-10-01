@@ -25,6 +25,9 @@ interface RoutePilotDao {
     @Query("DELETE FROM recent_destinations WHERE id = :destinationId")
     suspend fun deleteDestinationById(destinationId: String)
 
+    @Query("DELETE FROM recent_destinations WHERE id LIKE :userPrefix")
+    suspend fun deleteDestinationsByPrefix(userPrefix: String)
+
     @Query("DELETE FROM recent_destinations")
     suspend fun clearAllDestinations()
 

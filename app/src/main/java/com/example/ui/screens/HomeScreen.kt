@@ -555,42 +555,21 @@ fun HomeScreen(
                             )
                             Spacer(modifier = Modifier.height(4.dp))
                             Text(
-                                text = "Places you visit or search will appear here.",
+                                text = "Places you search or visit with this account will appear here.",
                                 style = MaterialTheme.typography.bodyMedium,
                                 color = Color(0xFF64748B)
                             )
                             Spacer(modifier = Modifier.height(12.dp))
-                            Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                                Button(
-                                    onClick = onRestoreRecentDestinations,
-                                    shape = RoundedCornerShape(12.dp),
-                                    colors = ButtonDefaults.buttonColors(containerColor = RoutePilotBlueLight),
-                                    modifier = Modifier.testTag("restore_recent_destinations_button")
-                                ) {
-                                    Icon(
-                                        imageVector = Icons.Default.Restore,
-                                        contentDescription = null,
-                                        tint = RoutePilotBlue,
-                                        modifier = Modifier.size(18.dp)
-                                    )
-                                    Spacer(modifier = Modifier.width(6.dp))
-                                    Text(
-                                        text = "Restore Visited",
-                                        color = RoutePilotBlue,
-                                        fontWeight = FontWeight.Bold
-                                    )
-                                }
-                                Button(
-                                    onClick = onOpenDestinationSearch,
-                                    shape = RoundedCornerShape(12.dp),
-                                    colors = ButtonDefaults.buttonColors(containerColor = RoutePilotBlue)
-                                ) {
-                                    Text(
-                                        text = "Search Place",
-                                        color = Color.White,
-                                        fontWeight = FontWeight.Bold
-                                    )
-                                }
+                            Button(
+                                onClick = onOpenDestinationSearch,
+                                shape = RoundedCornerShape(12.dp),
+                                colors = ButtonDefaults.buttonColors(containerColor = RoutePilotBlue)
+                            ) {
+                                Text(
+                                    text = "Search Place",
+                                    color = Color.White,
+                                    fontWeight = FontWeight.Bold
+                                )
                             }
                         }
                     }

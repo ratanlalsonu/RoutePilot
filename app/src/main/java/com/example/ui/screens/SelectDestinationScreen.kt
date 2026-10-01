@@ -142,9 +142,12 @@ fun SelectDestinationScreen(
     searchCenterLocation: LocationPoint? = null,
     searchCenterLabel: String = "Your Current Location",
     selectedCategoryChip: String? = null,
+    isMultiMarkerCategoryView: Boolean = false,
+    fitAllMarkersTrigger: Int = 0,
     onSearchQueryChange: (String) -> Unit,
     onSearchSubmit: ((String) -> Unit)? = null,
     onSelectCategoryChip: ((String) -> Unit)? = null,
+    onShowAllMarkersOnMap: (() -> Unit)? = null,
     @Suppress("UNUSED_PARAMETER") onUpdateLocationFilter: ((String) -> Unit)? = null,
     onUseCurrentLocation: (() -> Unit)? = null,
     onSelectPlaceSuggestion: (Destination) -> Unit,
@@ -500,6 +503,8 @@ fun SelectDestinationScreen(
                     hazards = activeHazards,
                     nearbyPlaces = searchResults,
                     searchCenterLocation = searchCenterLocation,
+                    isMultiMarkerCategoryView = isMultiMarkerCategoryView,
+                    fitAllMarkersTrigger = fitAllMarkersTrigger,
                     isNavigationMode = false,
                     isMapsApiKeyConfigured = isMapsApiKeyConfigured,
                     hasLocationPermission = hasLocationPermission,
@@ -519,6 +524,55 @@ fun SelectDestinationScreen(
                     modifier = Modifier.fillMaxSize()
                 )
 
+                // Floating Google Maps-style Red Markers Count & "Show All on Map" Pill
+                if (!showDropdown && searchResults.size > 1) {
+                    Surface(
+                        shape = RoundedCornerShape(50),
+                        color = Color.White,
+                        border = BorderStroke(1.dp, HazardRed.copy(alpha = 0.45f)),
+                        shadowElevation = 8.dp,
+                        modifier = Modifier
+                            .align(Alignment.TopCenter)
+                            .padding(top = 10.dp, start = 14.dp, end = 14.dp)
+                            .clickable {
+                                focusManager.clearFocus()
+                                keyboardController?.hide()
+                                onShowAllMarkersOnMap?.invoke()
+                            }
+                            .testTag("red_markers_map_summary_pill")
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(horizontal = 14.dp, vertical = 7.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.LocationOn,
+                                contentDescription = null,
+                                tint = HazardRed,
+                                modifier = Modifier.size(17.dp)
+                            )
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text(
+                                text = "${searchResults.size} Red Markers • $searchCenterLabel",
+                                style = MaterialTheme.typography.labelMedium.copy(
+                                    fontWeight = FontWeight.ExtraBold,
+                                    color = Color(0xFF0F172A),
+                                    fontSize = 12.sp
+                                )
+                            )
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text(
+                                text = "Fit All",
+                                style = MaterialTheme.typography.labelSmall.copy(
+                                    fontWeight = FontWeight.ExtraBold,
+                                    color = HazardRed,
+                                    fontSize = 11.sp
+                                )
+                            )
+                        }
+                    }
+                }
+
                 // Expandable Places List / Autocomplete Suggestions Overlay when typing
                 if (showDropdown && searchResults.isNotEmpty()) {
                     Card(
@@ -528,32 +582,56 @@ fun SelectDestinationScreen(
                         modifier = Modifier
                             .fillMaxWidth()
                             .padding(horizontal = 14.dp, vertical = 4.dp)
-                            .heightIn(max = 250.dp)
+                            .heightIn(max = 220.dp)
                             .align(Alignment.TopCenter)
                     ) {
                         Column {
                             Row(
                                 modifier = Modifier
                                     .fillMaxWidth()
-                                    .background(Color(0xFFF8FAFC))
-                                    .padding(horizontal = 14.dp, vertical = 8.dp),
+                                    .background(Color(0xFFFEF2F2))
+                                    .clickable {
+                                        focusManager.clearFocus()
+                                        keyboardController?.hide()
+                                        showDropdown = false
+                                        if (onSearchSubmit != null && searchQuery.isNotBlank()) {
+                                            onSearchSubmit(searchQuery)
+                                        } else {
+                                            onShowAllMarkersOnMap?.invoke()
+                                        }
+                                    }
+                                    .padding(horizontal = 14.dp, vertical = 9.dp)
+                                    .testTag("dropdown_show_all_red_markers_row"),
                                 verticalAlignment = Alignment.CenterVertically,
                                 horizontalArrangement = Arrangement.SpaceBetween
                             ) {
-                                Text(
-                                    text = "Places Found (${searchResults.size}) • $searchCenterLabel",
-                                    style = MaterialTheme.typography.labelMedium.copy(
-                                        fontWeight = FontWeight.Bold,
-                                        color = Color(0xFF334155)
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    modifier = Modifier.weight(1f)
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.LocationOn,
+                                        contentDescription = null,
+                                        tint = HazardRed,
+                                        modifier = Modifier.size(18.dp)
                                     )
-                                )
+                                    Spacer(modifier = Modifier.width(6.dp))
+                                    Text(
+                                        text = "Mark all ${searchResults.size} in Red on Map • $searchCenterLabel",
+                                        style = MaterialTheme.typography.labelMedium.copy(
+                                            fontWeight = FontWeight.ExtraBold,
+                                            color = HazardRed
+                                        ),
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                }
                                 Text(
-                                    text = "View on Map",
+                                    text = "Show Map",
                                     style = MaterialTheme.typography.labelMedium.copy(
-                                        fontWeight = FontWeight.Bold,
+                                        fontWeight = FontWeight.ExtraBold,
                                         color = RoutePilotBlue
-                                    ),
-                                    modifier = Modifier.clickable { showDropdown = false }
+                                    )
                                 )
                             }
                             HorizontalDivider(color = Color(0xFFE2E8F0))

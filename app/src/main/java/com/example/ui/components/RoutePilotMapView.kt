@@ -120,6 +120,8 @@ fun RoutePilotMapView(
     hazards: List<Hazard> = emptyList(),
     nearbyPlaces: List<Destination> = emptyList(),
     searchCenterLocation: LocationPoint? = null,
+    isMultiMarkerCategoryView: Boolean = false,
+    fitAllMarkersTrigger: Int = 0,
     remainingDistanceMeters: Double? = null,
     remainingEtaSeconds: Int? = null,
     isNavigationMode: Boolean = false,
@@ -306,45 +308,105 @@ fun RoutePilotMapView(
         nearbyPlaces.joinToString("|") { "${it.id}:${it.latitude}:${it.longitude}" }
     }
 
-    // Frame all nearby Red Location Markers when a Nearby Places / Category search updates
+    // Unified Camera Controller:
+    // 1. Multi-Marker Category / Location Search -> frames ALL Red Location Markers in LatLngBounds
+    // 2. Initial SelectDestinationScreen Open -> centers on User's Current Location
+    // 3. Tapped Single Marker -> centers on that selected marker while keeping all red markers visible
+    // 4. Route Preview / Active Navigation -> frames route or tracks 3D navigation camera
     LaunchedEffect(
         nearbyIdsSignature,
         searchCenterLocation?.latitude,
         searchCenterLocation?.longitude,
+        isMultiMarkerCategoryView,
+        fitAllMarkersTrigger,
+        destination?.id,
+        destination?.latitude,
+        destination?.longitude,
         primaryRoute?.id,
         isNavigationMode
     ) {
-        runCatching {
-            if (!isNavigationMode && primaryRoute == null && nearbyPlaces.isNotEmpty()) {
-                val anchor = searchCenterLocation ?: currentLocation
-                val boundsBuilder = LatLngBounds.builder()
-                boundsBuilder.include(LatLng(anchor.latitude, anchor.longitude))
-                var includedCount = 1
-                nearbyPlaces.forEach { place ->
-                    val dMeters = GeoUtils.haversineMeters(
+        if (!isNavigationMode && primaryRoute == null) {
+            val shouldFrameAllRedMarkers = nearbyPlaces.isNotEmpty() && (
+                isMultiMarkerCategoryView ||
+                    (nearbyPlaces.size > 1 && destination?.id == nearbyPlaces.firstOrNull()?.id)
+                )
+            if (shouldFrameAllRedMarkers) {
+                val anchor = searchCenterLocation
+                    ?: LocationPoint(nearbyPlaces.first().latitude, nearbyPlaces.first().longitude)
+                val clusterPlaces = nearbyPlaces.filter { place ->
+                    GeoUtils.haversineMeters(
                         anchor.latitude,
                         anchor.longitude,
                         place.latitude,
                         place.longitude
-                    )
-                    if (dMeters <= 45_000.0) {
-                        boundsBuilder.include(LatLng(place.latitude, place.longitude))
-                        includedCount++
-                    }
+                    ) <= 35_000.0
+                }.ifEmpty { nearbyPlaces }
+
+                val boundsBuilder = LatLngBounds.builder()
+                var includedCount = 0
+                clusterPlaces.forEach { place ->
+                    boundsBuilder.include(LatLng(place.latitude, place.longitude))
+                    includedCount++
                 }
+                // Only include currentLocation if searching around current location (within 12 km)
+                val distDriverToAnchor = GeoUtils.haversineMeters(
+                    currentLocation.latitude,
+                    currentLocation.longitude,
+                    anchor.latitude,
+                    anchor.longitude
+                )
+                if (searchCenterLocation == null && distDriverToAnchor <= 12_000.0) {
+                    boundsBuilder.include(LatLng(currentLocation.latitude, currentLocation.longitude))
+                    includedCount++
+                }
+
                 if (includedCount >= 2) {
-                    cameraPositionState.animate(
-                        CameraUpdateFactory.newLatLngBounds(boundsBuilder.build(), 140)
-                    )
+                    val bounds = boundsBuilder.build()
+                    val animated = runCatching {
+                        cameraPositionState.animate(
+                            CameraUpdateFactory.newLatLngBounds(bounds, 135)
+                        )
+                    }.isSuccess
+                    if (!animated) {
+                        runCatching {
+                            cameraPositionState.animate(
+                                CameraUpdateFactory.newLatLngBounds(bounds, 1000, 1100, 140)
+                            )
+                        }
+                    }
                 } else {
-                    val first = nearbyPlaces.first()
+                    val first = clusterPlaces.first()
                     val camPos = CameraPosition.Builder()
                         .target(LatLng(first.latitude, first.longitude))
                         .zoom(14.5f)
+                        .bearing(0f)
+                        .tilt(0f)
                         .build()
+                    runCatching {
+                        cameraPositionState.animate(CameraUpdateFactory.newCameraPosition(camPos))
+                    }
+                }
+            } else {
+                val isCurrentUserLoc = destination == null || destination.id == "current_user_location"
+                val targetLat = if (isCurrentUserLoc) displayDriverLocation.latitude else destination!!.latitude
+                val targetLng = if (isCurrentUserLoc) displayDriverLocation.longitude else destination!!.longitude
+                val targetZoom = if (isCurrentUserLoc) {
+                    15.8f
+                } else {
+                    max(cameraPositionState.position.zoom, 15.2f).coerceAtMost(16.8f)
+                }
+                val camPos = CameraPosition.Builder()
+                    .target(LatLng(targetLat, targetLng))
+                    .zoom(targetZoom)
+                    .bearing(0f)
+                    .tilt(0f)
+                    .build()
+                runCatching {
                     cameraPositionState.animate(CameraUpdateFactory.newCameraPosition(camPos))
                 }
-            } else if ((!isNavigationMode || isGreenTheme) && primaryRoute != null && primaryRoute.points.size >= 2) {
+            }
+        } else if ((!isNavigationMode || isGreenTheme) && primaryRoute != null && primaryRoute.points.size >= 2) {
+            runCatching {
                 val boundsBuilder = LatLngBounds.builder()
                 primaryRoute.points.forEach { pt ->
                     boundsBuilder.include(LatLng(pt.latitude, pt.longitude))
@@ -359,10 +421,20 @@ fun RoutePilotMapView(
                 destination?.let {
                     boundsBuilder.include(LatLng(it.latitude, it.longitude))
                 }
-                cameraPositionState.animate(
-                    CameraUpdateFactory.newLatLngBounds(boundsBuilder.build(), 140)
-                )
-            } else if (isNavigationMode) {
+                val bounds = boundsBuilder.build()
+                val animated = runCatching {
+                    cameraPositionState.animate(
+                        CameraUpdateFactory.newLatLngBounds(bounds, 140)
+                    )
+                }.isSuccess
+                if (!animated) {
+                    cameraPositionState.animate(
+                        CameraUpdateFactory.newLatLngBounds(bounds, 1000, 1100, 140)
+                    )
+                }
+            }
+        } else if (isNavigationMode) {
+            runCatching {
                 val firstHazard = hazards.firstOrNull { it.isEffectiveHazard }
                 if (firstHazard != null && primaryRoute != null && primaryRoute.points.size >= 2) {
                     val boundsBuilder = LatLngBounds.builder()
@@ -387,37 +459,6 @@ fun RoutePilotMapView(
                         CameraUpdateFactory.newCameraPosition(camPos)
                     )
                 }
-            }
-        }
-    }
-
-    // Center smoothly on the user's Current Location when SelectDestinationScreen opens (or on a tapped/searched destination)
-    LaunchedEffect(
-        destination?.id,
-        destination?.latitude,
-        destination?.longitude,
-        displayDriverLocation.latitude,
-        displayDriverLocation.longitude
-    ) {
-        if (!isNavigationMode && primaryRoute == null) {
-            runCatching {
-                val isCurrentUserLoc = destination == null || destination.id == "current_user_location"
-                val targetLat = if (isCurrentUserLoc) displayDriverLocation.latitude else destination!!.latitude
-                val targetLng = if (isCurrentUserLoc) displayDriverLocation.longitude else destination!!.longitude
-                val targetZoom = if (isCurrentUserLoc) {
-                    15.8f
-                } else {
-                    max(cameraPositionState.position.zoom, 14.8f).coerceAtMost(16.5f)
-                }
-                val camPos = CameraPosition.Builder()
-                    .target(LatLng(targetLat, targetLng))
-                    .zoom(targetZoom)
-                    .bearing(0f)
-                    .tilt(0f)
-                    .build()
-                cameraPositionState.animate(
-                    CameraUpdateFactory.newCameraPosition(camPos)
-                )
             }
         }
     }
@@ -700,7 +741,7 @@ fun RoutePilotMapView(
                 }
             }
 
-            // 4. Nearby Places Red Location Markers (Google Maps-style multi-marker display)
+            // 4. Nearby Places Red Location Markers (Google Maps-style multi-marker display with Red Pin + Place Label)
             if (!isNavigationMode && primaryRoute == null && nearbyPlaces.isNotEmpty()) {
                 nearbyPlaces.forEach { place ->
                     val isSelectedPlace = destination?.id == place.id ||
@@ -718,14 +759,22 @@ fun RoutePilotMapView(
                         )
                     }
 
+                    val (redPinBitmap, pinAnchor) = remember(place.id, place.name, isSelectedPlace) {
+                        createGoogleMapsRedPlacePinBitmap(
+                            title = place.name,
+                            isSelected = isSelectedPlace
+                        )
+                    }
+
                     Marker(
                         state = remember(place.id, place.latitude, place.longitude) {
                             MarkerState(position = LatLng(place.latitude, place.longitude))
                         },
                         title = place.name,
                         snippet = "${place.category} • ${place.address}",
-                        zIndex = if (isSelectedPlace) 9.2f else 7.4f,
-                        icon = BitmapDescriptorFactory.defaultMarker(BitmapDescriptorFactory.HUE_RED),
+                        anchor = pinAnchor,
+                        zIndex = if (isSelectedPlace) 9.4f else 7.8f,
+                        icon = BitmapDescriptorFactory.fromBitmap(redPinBitmap),
                         onClick = { marker ->
                             onSelectNearbyPlace?.invoke(place)
                             marker.showInfoWindow()
@@ -1526,4 +1575,124 @@ private fun createHazardTriangleBitmap(colorArgb: Int): Bitmap {
     canvas.drawCircle(cx, 67f, 4f, dotPaint)
 
     return bmp
+}
+
+/**
+ * Creates a Google Maps-style Red Teardrop Location Pin (`#EA4335`) with a crisp white-haloed
+ * place name label beside it so all matching category locations stand out in red on the map.
+ */
+private fun createGoogleMapsRedPlacePinBitmap(
+    title: String,
+    isSelected: Boolean
+): Pair<Bitmap, Offset> {
+    val cleanTitle = title.trim().let {
+        if (it.length > 22) it.take(20).trimEnd() + "…" else it
+    }
+
+    val textSizePx = if (isSelected) 25f else 22f
+    val textFillPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = if (isSelected) Color(0xFF991B1B).toArgb() else Color(0xFFB31412).toArgb()
+        textSize = textSizePx
+        typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
+    }
+    val textStrokePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = android.graphics.Color.WHITE
+        textSize = textSizePx
+        typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
+        style = Paint.Style.STROKE
+        strokeWidth = 7.5f
+        strokeJoin = Paint.Join.ROUND
+        strokeCap = Paint.Cap.ROUND
+    }
+
+    val pinRadius = if (isSelected) 21f else 17f
+    val pinHeight = if (isSelected) 54f else 44f
+    val leftPad = 8f
+    val topPad = 6f
+    val pinCenterX = leftPad + pinRadius
+    val pinHeadCenterY = topPad + pinRadius
+    val pinTipY = topPad + pinHeight
+
+    val labelStartX = pinCenterX + pinRadius + 8f
+    val measuredTextW = textFillPaint.measureText(cleanTitle)
+    val totalW = (labelStartX + measuredTextW + 14f).toInt().coerceAtLeast(80)
+    val totalH = (pinTipY + 8f).toInt().coerceAtLeast(60)
+
+    val bmp = Bitmap.createBitmap(totalW, totalH, Bitmap.Config.ARGB_8888)
+    val canvas = android.graphics.Canvas(bmp)
+
+    // 1. Soft ground shadow at pin tip
+    val shadowPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = android.graphics.Color.argb(65, 15, 23, 42)
+        style = Paint.Style.FILL
+    }
+    canvas.drawOval(
+        RectF(pinCenterX - 8f, pinTipY - 3f, pinCenterX + 8f, pinTipY + 4f),
+        shadowPaint
+    )
+
+    // 2. Teardrop Pin Path
+    val pinPath = android.graphics.Path().apply {
+        moveTo(pinCenterX, pinTipY)
+        cubicTo(
+            pinCenterX - pinRadius * 0.55f,
+            pinTipY - pinHeight * 0.28f,
+            pinCenterX - pinRadius,
+            pinHeadCenterY + pinRadius * 0.45f,
+            pinCenterX - pinRadius,
+            pinHeadCenterY
+        )
+        arcTo(
+            RectF(
+                pinCenterX - pinRadius,
+                pinHeadCenterY - pinRadius,
+                pinCenterX + pinRadius,
+                pinHeadCenterY + pinRadius
+            ),
+            180f,
+            180f,
+            false
+        )
+        cubicTo(
+            pinCenterX + pinRadius,
+            pinHeadCenterY + pinRadius * 0.45f,
+            pinCenterX + pinRadius * 0.55f,
+            pinTipY - pinHeight * 0.28f,
+            pinCenterX,
+            pinTipY
+        )
+        close()
+    }
+
+    val whiteOutlinePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = android.graphics.Color.WHITE
+        style = Paint.Style.STROKE
+        strokeWidth = if (isSelected) 5.5f else 4f
+        strokeJoin = Paint.Join.ROUND
+    }
+    val redPinFillPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = if (isSelected) Color(0xFFD93025).toArgb() else Color(0xFFEA4335).toArgb()
+        style = Paint.Style.FILL
+    }
+
+    canvas.drawPath(pinPath, whiteOutlinePaint)
+    canvas.drawPath(pinPath, redPinFillPaint)
+
+    // 3. White inner circle inside the red pin head (classic Google Maps POI marker dot)
+    val innerDotPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = android.graphics.Color.WHITE
+        style = Paint.Style.FILL
+    }
+    canvas.drawCircle(pinCenterX, pinHeadCenterY, if (isSelected) 8.2f else 6.5f, innerDotPaint)
+
+    // 4. Crisp Google Maps-style Place Name Label beside the red pin
+    val textBaselineY = pinHeadCenterY + (textSizePx * 0.36f)
+    canvas.drawText(cleanTitle, labelStartX, textBaselineY, textStrokePaint)
+    canvas.drawText(cleanTitle, labelStartX, textBaselineY, textFillPaint)
+
+    val anchorOffset = Offset(
+        x = (pinCenterX / totalW.toFloat()).coerceIn(0f, 1f),
+        y = (pinTipY / totalH.toFloat()).coerceIn(0f, 1f)
+    )
+    return bmp to anchorOffset
 }

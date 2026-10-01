@@ -73,9 +73,14 @@ data class RoutePilotUiState(
     val isGpsEnabled: Boolean = true,
     val isMapsApiKeyConfigured: Boolean = false,
     val searchQuery: String = "",
-    val searchResults: List<Destination> = DestinationRepositoryImpl.defaultReferenceDestinations,
+    val searchResults: List<Destination> = emptyList(),
     val isSearchingPlaces: Boolean = false,
-    val recentDestinations: List<Destination> = DestinationRepositoryImpl.defaultReferenceDestinations,
+    val searchCenterLocation: LocationPoint? = null,
+    val searchCenterLabel: String = "Your Current Location",
+    val selectedCategoryChip: String? = null,
+    val isMultiMarkerCategoryView: Boolean = false,
+    val fitAllMarkersTrigger: Int = 0,
+    val recentDestinations: List<Destination> = emptyList(),
     val selectedDestination: Destination = DestinationRepositoryImpl.defaultReferenceDestinations.first(),
     val recommendedRoute: Route? = null,
     val alternateRoute: Route? = null,
@@ -168,25 +173,35 @@ class RoutePilotViewModel(
         }
 
         viewModelScope.launch {
-            destinationRepository.getRecentDestinations(includeDemoSamples = true)
+            destinationRepository.getRecentDestinations(includeDemoSamples = false)
                 .collectLatest { recent ->
                     _uiState.update { it.copy(recentDestinations = recent) }
                 }
         }
-
-        viewModelScope.launch {
-            journeyRepository.getJourneyHistory(includeDemoSamples = false)
-                .collectLatest { history ->
-                    _uiState.update { it.copy(journeyHistory = history) }
-                }
-        }
     }
+
+    private var journeySubscriptionJob: Job? = null
 
     private fun observeAuthentication() {
         viewModelScope.launch {
             authRepository.currentUser.collectLatest { user ->
+                (destinationRepository as? DestinationRepositoryImpl)?.setActiveUser(
+                    userId = user?.id,
+                    email = user?.email
+                )
                 _uiState.update { it.copy(currentUser = user) }
+                journeySubscriptionJob?.cancel()
                 if (user != null) {
+                    journeySubscriptionJob = viewModelScope.launch {
+                        journeyRepository.getJourneyHistory(includeDemoSamples = false)
+                            .collectLatest { history ->
+                                val userHistory = history.filter { j ->
+                                    j.userId.equals(user.id, ignoreCase = true) ||
+                                        j.userId.equals(user.email, ignoreCase = true)
+                                }
+                                _uiState.update { it.copy(journeyHistory = userHistory) }
+                            }
+                    }
                     observeRealtimeHazards()
                     viewModelScope.launch {
                         runCatching {
@@ -201,6 +216,12 @@ class RoutePilotViewModel(
                         }
                     }
                 } else {
+                    _uiState.update {
+                        it.copy(
+                            recentDestinations = emptyList(),
+                            journeyHistory = emptyList()
+                        )
+                    }
                     hazardSubscriptionJob?.cancel()
                     hazardSubscriptionJob = null
                 }
@@ -383,23 +404,13 @@ class RoutePilotViewModel(
             return
         }
 
-        val dtSeconds = if (lastNavigationUpdateMillis > 0L) {
-            ((nowMillis - lastNavigationUpdateMillis).coerceIn(200L, 4000L)) / 1000.0
-        } else {
-            0.5
+        // Ignore tiny stationary GPS jitter (< 2.0m when not moving) so distance & ETA never drift while stationary
+        if (coordStepMeters < 2.0 && newPoint.speedMps < 0.6f) {
+            return
         }
-        val speedStepMeters = if (newPoint.speedMps >= 0.35f) (newPoint.speedMps * dtSeconds) else 0.0
-        val stepMeters = max(if (coordStepMeters >= 0.25) coordStepMeters else 0.0, speedStepMeters)
 
-        if (stepMeters > 0.0) {
-            cumulativeTravelledMeters += stepMeters
-            activeTravelElapsedSeconds += max(1, dtSeconds.roundToInt())
-            lastTrackedDriverLocation = newPoint
-        }
+        lastTrackedDriverLocation = newPoint
         lastNavigationUpdateMillis = nowMillis
-
-        val distFromOriginMeters = GeoUtils.haversineMeters(navigationOriginLocation, newPoint)
-            .let { if (it <= 35_000.0) it else 0.0 }
 
         val currentStraightLineToDest = GeoUtils.haversineMeters(
             newPoint.latitude,
@@ -407,36 +418,28 @@ class RoutePilotViewModel(
             activeRoute.destination.latitude,
             activeRoute.destination.longitude
         )
-        val straightLineSavedMeters = if (
-            initialStraightLineToDestMeters > 10.0 &&
-            currentStraightLineToDest < initialStraightLineToDestMeters
-        ) {
-            (initialStraightLineToDestMeters - currentStraightLineToDest) *
-                (initialRouteTotalDistanceMeters / initialStraightLineToDestMeters)
-        } else {
-            0.0
-        }
+
+        val straightLineRatio = currentStraightLineToDest / max(1.0, initialStraightLineToDestMeters)
+        val straightLineScaledMeters = (initialRouteTotalDistanceMeters * straightLineRatio).coerceAtLeast(0.0)
 
         val polylineRem = GeoUtils.computeRemainingPolylineDistanceMeters(
             newPoint,
             activeRoute.points,
             initialRouteTotalDistanceMeters
         )
-        val polylineSavedMeters = if (polylineRem != null) {
-            (initialRouteTotalDistanceMeters - polylineRem).coerceAtLeast(0.0)
-        } else {
-            0.0
+
+        // Real bidirectional remaining distance: decreases when moving toward destination, increases when moving away
+        val remMeters = when {
+            polylineRem != null && currentStraightLineToDest <= initialStraightLineToDestMeters -> {
+                kotlin.math.min(polylineRem, straightLineScaledMeters).coerceAtLeast(0.0)
+            }
+            polylineRem != null -> {
+                max(polylineRem, straightLineScaledMeters).coerceAtLeast(0.0)
+            }
+            else -> {
+                straightLineScaledMeters
+            }
         }
-
-        val totalCoveredMeters = maxOf(
-            cumulativeTravelledMeters,
-            distFromOriginMeters,
-            straightLineSavedMeters,
-            polylineSavedMeters
-        ).coerceIn(0.0, initialRouteTotalDistanceMeters)
-
-        val candidateRemMeters = (initialRouteTotalDistanceMeters - totalCoveredMeters).coerceAtLeast(0.0)
-        val remMeters = kotlin.math.min(state.remainingDistanceMeters, candidateRemMeters).coerceAtLeast(0.0)
 
         // 1. Check arrival at destination
         if (remMeters <= 25.0 || routeImpactDetector.hasArrivedAtDestination(
@@ -449,38 +452,29 @@ class RoutePilotViewModel(
             return
         }
 
-        // 2. Compute live remaining time in seconds & minutes
-        val distRatioRemaining = (remMeters / max(1.0, initialRouteTotalDistanceMeters)).coerceIn(0.0, 1.0)
-        val timeByDistRatioSecs = (initialRouteDurationSeconds * distRatioRemaining).roundToInt()
-        val timeByElapsedSecs = (initialRouteDurationSeconds - activeTravelElapsedSeconds).coerceAtLeast(1)
-        val speedBlendedSecs = if (newPoint.speedMps >= 2.0f) {
-            ((remMeters / newPoint.speedMps) * 0.35 + timeByDistRatioSecs * 0.65).roundToInt()
+        // 2. Compute live remaining time in seconds & minutes strictly from real remaining distance & live GPS speed
+        val avgRouteSpeedMps = (initialRouteTotalDistanceMeters / max(1, initialRouteDurationSeconds)).coerceIn(4.0, 25.0)
+        val effectiveSpeedMps = if (newPoint.speedMps >= 1.5f) {
+            (newPoint.speedMps * 0.4 + avgRouteSpeedMps * 0.6).coerceIn(1.5, 35.0)
         } else {
-            timeByDistRatioSecs
+            avgRouteSpeedMps
         }
-        val candidateRemSecs = minOf(timeByDistRatioSecs, timeByElapsedSecs, speedBlendedSecs).coerceAtLeast(1)
-        val remSecs = kotlin.math.min(state.remainingEtaSeconds, candidateRemSecs).coerceAtLeast(1)
+        val remSecs = (remMeters / effectiveSpeedMps).roundToInt().coerceAtLeast(1)
         val remMins = max(1, (remSecs + 30) / 60)
 
         // 3. Update live distance & instruction to next turn along route segments
+        val netCoveredMeters = (initialRouteTotalDistanceMeters - remMeters).coerceAtLeast(0.0)
         val (turnDistMeters, turnInstr, turnManeuver) = computeLiveTurnGuidance(
             route = activeRoute,
-            totalCoveredMeters = totalCoveredMeters,
+            totalCoveredMeters = netCoveredMeters,
             fallbackDistance = state.currentTurnDistanceMeters,
             fallbackInstruction = state.currentTurnInstruction,
             fallbackManeuver = state.currentTurnManeuver
         )
 
-        // 4. Advance position along route polyline when moving near origin so arrow & route progress in sync
-        val effectiveDriverPoint = interpolateDriverPointAlongRouteIfIndoorStep(
-            rawPoint = newPoint,
-            route = activeRoute,
-            totalCoveredMeters = totalCoveredMeters
-        )
-
         _uiState.update {
             it.copy(
-                currentLocation = effectiveDriverPoint,
+                currentLocation = newPoint,
                 remainingDistanceMeters = remMeters,
                 remainingEtaMinutes = remMins,
                 remainingEtaSeconds = remSecs,
@@ -490,7 +484,7 @@ class RoutePilotViewModel(
             )
         }
 
-        // 5. Re-check hazard impact at the new location
+        // 4. Re-check hazard impact at the new location
         evaluateActiveNavigationAgainstHazards(state.activeHazards)
         pushLiveTelemetryToConsole(force = false)
     }
@@ -847,6 +841,7 @@ class RoutePilotViewModel(
     // ========================================================================
 
     fun openDestinationSearchAtCurrentLocation() {
+        searchDebounceJob?.cancel()
         refreshDeviceLocationStatus()
         val loc = _uiState.value.currentLocation
         val currentLocDest = Destination(
@@ -863,6 +858,10 @@ class RoutePilotViewModel(
                 searchQuery = "",
                 searchResults = emptyList(),
                 isSearchingPlaces = false,
+                searchCenterLocation = null,
+                searchCenterLabel = "Your Current Location",
+                selectedCategoryChip = null,
+                isMultiMarkerCategoryView = false,
                 selectedDestination = currentLocDest
             )
         }
@@ -884,29 +883,59 @@ class RoutePilotViewModel(
 
     fun updateSearchQuery(query: String) {
         if (query.isBlank()) {
-            searchDebounceJob?.cancel()
-            _uiState.update {
-                it.copy(
-                    searchQuery = "",
-                    searchResults = emptyList(),
-                    isSearchingPlaces = false
-                )
-            }
+            openDestinationSearchAtCurrentLocation()
             return
         }
-        _uiState.update { it.copy(searchQuery = query, isSearchingPlaces = true) }
+        val currentLoc = _uiState.value.currentLocation
+        val repoImpl = destinationRepository as? DestinationRepositoryImpl
+        val intent = repoImpl?.parseSearchIntent(query)
+        val fastCenter = repoImpl?.getFastSearchCenter(query, currentLoc) ?: currentLoc
+        val centerLabel = intent?.explicitLocationName
+            ?.trim()
+            ?.takeIf { it.isNotEmpty() }
+            ?.split(" ")
+            ?.joinToString(" ") { w -> w.replaceFirstChar { c -> c.uppercase() } }
+            ?: "Your Current Location"
+
+        val instantSuggestions = repoImpl
+            ?.getInstantPlaceSuggestions(query, currentLoc)
+            .orEmpty()
+        val instantFirst = instantSuggestions.firstOrNull()
+
+        _uiState.update { state ->
+            state.copy(
+                searchQuery = query,
+                searchResults = instantSuggestions,
+                isSearchingPlaces = true,
+                searchCenterLocation = fastCenter,
+                searchCenterLabel = centerLabel,
+                selectedCategoryChip = intent?.categorySpec?.canonicalCategory,
+                isMultiMarkerCategoryView = true,
+                fitAllMarkersTrigger = state.fitAllMarkersTrigger + 1,
+                selectedDestination = instantFirst ?: state.selectedDestination
+            )
+        }
         searchDebounceJob?.cancel()
         searchDebounceJob = viewModelScope.launch {
-            delay(220L)
-            val currentLoc = _uiState.value.currentLocation
+            delay(70L)
+            val onlineCenter = repoImpl?.resolveOnlineSearchCenter(query, currentLoc) ?: fastCenter
             val res = destinationRepository.searchPlaces(query, currentLoc)
             res.onSuccess { list ->
-                val localizedList = list.map { localizeDestinationToDriverRegion(it, currentLoc) }
-                _uiState.update {
-                    it.copy(
-                        searchResults = localizedList,
-                        isSearchingPlaces = false
-                    )
+                if (list.isNotEmpty()) {
+                    _uiState.update { state ->
+                        state.copy(
+                            searchResults = list,
+                            isSearchingPlaces = false,
+                            searchCenterLocation = onlineCenter,
+                            searchCenterLabel = centerLabel,
+                            selectedCategoryChip = intent?.categorySpec?.canonicalCategory,
+                            isMultiMarkerCategoryView = true,
+                            fitAllMarkersTrigger = state.fitAllMarkersTrigger + 1,
+                            selectedDestination = list.firstOrNull() ?: state.selectedDestination
+                        )
+                    }
+                } else {
+                    _uiState.update { it.copy(isSearchingPlaces = false) }
                 }
             }.onFailure {
                 _uiState.update { it.copy(isSearchingPlaces = false) }
@@ -920,20 +949,56 @@ class RoutePilotViewModel(
             openDestinationSearchAtCurrentLocation()
             return
         }
-        _uiState.update { it.copy(searchQuery = trimmed, isSearchingPlaces = true) }
+        val currentLoc = _uiState.value.currentLocation
+        val repoImpl = destinationRepository as? DestinationRepositoryImpl
+        val intent = repoImpl?.parseSearchIntent(trimmed)
+        val fastCenter = repoImpl?.getFastSearchCenter(trimmed, currentLoc) ?: currentLoc
+        val centerLabel = intent?.explicitLocationName
+            ?.trim()
+            ?.takeIf { it.isNotEmpty() }
+            ?.split(" ")
+            ?.joinToString(" ") { w -> w.replaceFirstChar { c -> c.uppercase() } }
+            ?: "Your Current Location"
+
+        val instantSuggestions = repoImpl
+            ?.getInstantPlaceSuggestions(trimmed, currentLoc)
+            .orEmpty()
+        val instantFirst = instantSuggestions.firstOrNull()
+
+        _uiState.update { state ->
+            state.copy(
+                searchQuery = trimmed,
+                searchResults = instantSuggestions,
+                isSearchingPlaces = true,
+                searchCenterLocation = fastCenter,
+                searchCenterLabel = centerLabel,
+                selectedCategoryChip = intent?.categorySpec?.canonicalCategory,
+                isMultiMarkerCategoryView = true,
+                fitAllMarkersTrigger = state.fitAllMarkersTrigger + 1,
+                selectedDestination = instantFirst ?: state.selectedDestination
+            )
+        }
         searchDebounceJob?.cancel()
         searchDebounceJob = viewModelScope.launch {
-            val currentLoc = _uiState.value.currentLocation
+            val onlineCenter = repoImpl?.resolveOnlineSearchCenter(trimmed, currentLoc) ?: fastCenter
             val res = destinationRepository.searchPlaces(trimmed, currentLoc)
             res.onSuccess { list ->
-                val localizedList = list.map { localizeDestinationToDriverRegion(it, currentLoc) }
-                val firstPlace = localizedList.firstOrNull()
-                _uiState.update { state ->
-                    state.copy(
-                        searchResults = localizedList,
-                        isSearchingPlaces = false,
-                        selectedDestination = firstPlace ?: state.selectedDestination
-                    )
+                val firstPlace = list.firstOrNull()
+                if (list.isNotEmpty()) {
+                    _uiState.update { state ->
+                        state.copy(
+                            searchResults = list,
+                            isSearchingPlaces = false,
+                            searchCenterLocation = onlineCenter,
+                            searchCenterLabel = centerLabel,
+                            selectedCategoryChip = intent?.categorySpec?.canonicalCategory,
+                            isMultiMarkerCategoryView = true,
+                            fitAllMarkersTrigger = state.fitAllMarkersTrigger + 1,
+                            selectedDestination = firstPlace ?: state.selectedDestination
+                        )
+                    }
+                } else {
+                    _uiState.update { it.copy(isSearchingPlaces = false) }
                 }
             }.onFailure {
                 _uiState.update { it.copy(isSearchingPlaces = false) }
@@ -941,15 +1006,64 @@ class RoutePilotViewModel(
         }
     }
 
-    fun selectQuickCategoryDestination(category: String, onSelected: () -> Unit) {
-        val target = when (category.uppercase()) {
-            "HOME" -> DestinationRepositoryImpl.realWorldGazetteer.first { it.id == "dest_home_sipri" }
-            "WORK" -> DestinationRepositoryImpl.realWorldGazetteer.first { it.id == "dest_work_civil_lines" }
-            "HOSPITAL" -> DestinationRepositoryImpl.defaultReferenceDestinations.first()
-            else -> DestinationRepositoryImpl.defaultReferenceDestinations.first()
+    fun selectCategoryChip(category: String) {
+        val currentQuery = _uiState.value.searchQuery.trim()
+        val repoImpl = destinationRepository as? DestinationRepositoryImpl
+        val currentIntent = repoImpl?.parseSearchIntent(currentQuery)
+        val explicitLocFromQuery = currentIntent?.explicitLocationName
+            ?: currentQuery.takeIf {
+                it.isNotEmpty() &&
+                    currentIntent?.categorySpec == null &&
+                    DestinationRepositoryImpl.isKnownLocationName(it)
+            }
+        val combinedQuery = if (!explicitLocFromQuery.isNullOrBlank()) {
+            "$category in $explicitLocFromQuery"
+        } else {
+            category
         }
-        selectDestinationCandidate(target)
-        onSelected()
+        submitPlaceSearch(combinedQuery)
+    }
+
+    fun showAllSearchMarkersOnMap() {
+        _uiState.update { state ->
+            state.copy(
+                isMultiMarkerCategoryView = true,
+                fitAllMarkersTrigger = state.fitAllMarkersTrigger + 1
+            )
+        }
+    }
+
+    fun focusOnSinglePlaceCandidate(destination: Destination) {
+        _uiState.update { state ->
+            state.copy(
+                selectedDestination = destination,
+                isMultiMarkerCategoryView = false,
+                workflowState = NavigationWorkflowState.DESTINATION_SELECTED
+            )
+        }
+        viewModelScope.launch {
+            destinationRepository.saveRecentDestination(destination.copy(isDemoSample = false))
+        }
+    }
+
+    fun selectQuickCategoryDestination(category: String, onSelected: () -> Unit) {
+        when (category.uppercase()) {
+            "HOME" -> {
+                val target = DestinationRepositoryImpl.realWorldGazetteer.first { it.id == "dest_home_sipri" }
+                selectDestinationCandidate(target)
+                onSelected()
+            }
+            "WORK" -> {
+                val target = DestinationRepositoryImpl.realWorldGazetteer.first { it.id == "dest_work_civil_lines" }
+                selectDestinationCandidate(target)
+                onSelected()
+            }
+            else -> {
+                val catLabel = if (category.equals("HOSPITAL", ignoreCase = true)) "Hospital" else category
+                submitPlaceSearch(catLabel)
+                onSelected()
+            }
+        }
     }
 
     private fun localizeDestinationToDriverRegion(
@@ -992,6 +1106,8 @@ class RoutePilotViewModel(
         _uiState.update {
             it.copy(
                 selectedDestination = localized,
+                searchResults = listOf(localized),
+                isMultiMarkerCategoryView = false,
                 workflowState = NavigationWorkflowState.DESTINATION_SELECTED
             )
         }
@@ -1025,6 +1141,7 @@ class RoutePilotViewModel(
             _uiState.update {
                 it.copy(
                     selectedDestination = dest,
+                    isMultiMarkerCategoryView = false,
                     workflowState = NavigationWorkflowState.DESTINATION_SELECTED
                 )
             }

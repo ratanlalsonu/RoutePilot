@@ -199,7 +199,7 @@ object GeoUtils {
             }
         }
 
-        if (bestDistToSeg > 220.0 || totalPolyLen <= 1.0) return null
+        if (totalPolyLen <= 1.0) return null
 
         var remainingPolyLen = segmentLengths[bestSegIdx] * (1.0 - bestT)
         for (j in (bestSegIdx + 1) until segmentLengths.size) {
@@ -207,6 +207,7 @@ object GeoUtils {
         }
 
         val scale = if (totalRouteMeters > 10.0) (totalRouteMeters / totalPolyLen) else 1.0
-        return (remainingPolyLen * scale).coerceIn(0.0, max(totalRouteMeters, totalPolyLen))
+        val extraOffRouteMeters = if (bestDistToSeg > 8.0) bestDistToSeg else 0.0
+        return (remainingPolyLen * scale + extraOffRouteMeters).coerceAtLeast(0.0)
     }
 }

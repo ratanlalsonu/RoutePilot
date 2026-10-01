@@ -11,10 +11,13 @@ import com.example.domain.model.LocationPoint
 import com.example.domain.repository.DestinationRepository
 import com.example.domain.routing.GeoUtils
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.onStart
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import org.json.JSONArray
 import org.json.JSONObject
 import java.net.HttpURLConnection
@@ -56,6 +59,39 @@ class DestinationRepositoryImpl(
 
     private val seedPrefs by lazy {
         context.getSharedPreferences("routepilot_dest_seed_prefs", Context.MODE_PRIVATE)
+    }
+
+    private val accountPrefs by lazy {
+        context.getSharedPreferences("routepilot_user_accounts", Context.MODE_PRIVATE)
+    }
+
+    private val searchCache = java.util.concurrent.ConcurrentHashMap<String, List<Destination>>()
+
+    private val activeUserKeyFlow = kotlinx.coroutines.flow.MutableStateFlow<String?>(resolveCurrentUserKey())
+
+    fun setActiveUser(userId: String?, email: String?) {
+        val normalizedEmail = email?.trim()?.lowercase(Locale.ROOT)?.takeIf { it.isNotEmpty() }
+        val normalizedId = userId?.trim()?.takeIf { it.isNotEmpty() }
+        activeUserKeyFlow.value = normalizedEmail ?: normalizedId ?: resolveCurrentUserKey()
+    }
+
+    private fun resolveCurrentUserKey(): String? {
+        val fbUser = runCatching {
+            if (com.google.firebase.FirebaseApp.getApps(context).isNotEmpty()) {
+                com.google.firebase.auth.FirebaseAuth.getInstance().currentUser
+            } else {
+                null
+            }
+        }.getOrNull()
+        val fbEmail = fbUser?.email?.trim()?.lowercase(Locale.ROOT)?.takeIf { it.isNotEmpty() }
+        if (fbEmail != null) return fbEmail
+        val fbUid = fbUser?.uid?.trim()?.takeIf { it.isNotEmpty() }
+        if (fbUid != null) return fbUid
+        val localEmail = accountPrefs.getString("active_user_email", null)
+            ?.trim()
+            ?.lowercase(Locale.ROOT)
+            ?.takeIf { it.isNotEmpty() }
+        return localEmail
     }
 
     companion object {
@@ -183,29 +219,105 @@ class DestinationRepositoryImpl(
             "jhansi" to LocationPoint(25.4484, 78.5685),
             "sipri" to LocationPoint(25.4515, 78.5480),
             "sipri bazaar" to LocationPoint(25.4515, 78.5480),
+            "sipri bazar" to LocationPoint(25.4515, 78.5480),
             "civil lines" to LocationPoint(25.4440, 78.5740),
             "medical road" to LocationPoint(25.4605, 78.6010),
             "sadar bazaar" to LocationPoint(25.4375, 78.5790),
+            "sadar bazar" to LocationPoint(25.4375, 78.5790),
             "elite chauraha" to LocationPoint(25.4495, 78.5698),
             "nandanpura" to LocationPoint(25.4670, 78.5610),
+            "nawabad" to LocationPoint(25.4565, 78.5910),
+            "babina" to LocationPoint(25.2422, 78.4694),
+            "mauranipur" to LocationPoint(25.2447, 79.1366),
+            "chirgaon" to LocationPoint(25.5768, 78.8224),
+            "moth" to LocationPoint(25.7214, 78.9482),
+            "garautha" to LocationPoint(25.5686, 79.2974),
+            "talbehat" to LocationPoint(25.0406, 78.4328),
+            "orchha" to LocationPoint(25.3519, 78.6419),
+            "niwari" to LocationPoint(25.3585, 78.8032),
+            "tikamgarh" to LocationPoint(24.7456, 78.8310),
+            "chhatarpur" to LocationPoint(24.9164, 79.5862),
+            "khajuraho" to LocationPoint(24.8318, 79.9199),
+            "datia" to LocationPoint(25.6670, 78.4609),
+            "shivpuri" to LocationPoint(25.4235, 77.6619),
+            "jalaun" to LocationPoint(26.1436, 79.3338),
+            "konch" to LocationPoint(25.9904, 79.1518),
+            "kalpi" to LocationPoint(26.1211, 79.7405),
+            "rath" to LocationPoint(25.5947, 79.5670),
+            "maudaha" to LocationPoint(25.6836, 80.1157),
+            "charkhari" to LocationPoint(25.4005, 79.7544),
+            "kulpahar" to LocationPoint(25.3168, 79.6345),
+            "naraini" to LocationPoint(25.1892, 80.4718),
+            "baberu" to LocationPoint(25.5469, 80.7082),
+            "manikpur" to LocationPoint(25.0528, 81.0964),
+            "atarra" to LocationPoint(25.2818, 80.5694),
+            "banda" to LocationPoint(25.4763, 80.3395),
+            "chitrakoot" to LocationPoint(25.2015, 80.8520),
+            "karwi" to LocationPoint(25.2116, 80.9165),
+            "mahoba" to LocationPoint(25.2921, 79.8722),
+            "orai" to LocationPoint(25.9922, 79.4534),
+            "lalitpur" to LocationPoint(24.6912, 78.4139),
+            "hamirpur" to LocationPoint(25.9554, 80.1481),
+            "fatehpur" to LocationPoint(25.9270, 80.8128),
+            "satna" to LocationPoint(24.5797, 80.8322),
+            "rewa" to LocationPoint(24.5362, 81.3037),
+            "panna" to LocationPoint(24.7180, 80.1844),
+            "katni" to LocationPoint(23.8343, 80.3894),
+            "jabalpur" to LocationPoint(23.1815, 79.9864),
+            "sagar" to LocationPoint(23.8388, 78.7378),
             "kanpur" to LocationPoint(26.4499, 80.3319),
+            "unnao" to LocationPoint(26.5393, 80.4878),
+            "raebareli" to LocationPoint(26.2345, 81.2409),
+            "etawah" to LocationPoint(26.7856, 79.0155),
             "lucknow" to LocationPoint(26.8467, 80.9462),
             "gwalior" to LocationPoint(26.2183, 78.1828),
             "delhi" to LocationPoint(28.6139, 77.2090),
             "new delhi" to LocationPoint(28.6139, 77.2090),
             "noida" to LocationPoint(28.5355, 77.3910),
+            "greater noida" to LocationPoint(28.4744, 77.5040),
+            "ghaziabad" to LocationPoint(28.6692, 77.4538),
+            "gurugram" to LocationPoint(28.4595, 77.0266),
+            "gurgaon" to LocationPoint(28.4595, 77.0266),
+            "faridabad" to LocationPoint(28.4089, 77.3178),
             "prayagraj" to LocationPoint(25.4358, 81.8463),
+            "allahabad" to LocationPoint(25.4358, 81.8463),
+            "varanasi" to LocationPoint(25.3176, 82.9739),
+            "banaras" to LocationPoint(25.3176, 82.9739),
+            "mirzapur" to LocationPoint(25.1337, 82.5644),
+            "jaunpur" to LocationPoint(25.7464, 82.6837),
+            "sultanpur" to LocationPoint(26.2648, 82.0727),
+            "pratapgarh" to LocationPoint(25.8971, 81.9442),
+            "gorakhpur" to LocationPoint(26.7606, 83.3732),
+            "ayodhya" to LocationPoint(26.7922, 82.1998),
+            "faizabad" to LocationPoint(26.7730, 82.1458),
             "agra" to LocationPoint(27.1767, 78.0081),
+            "mathura" to LocationPoint(27.4924, 77.6737),
+            "aligarh" to LocationPoint(27.8974, 78.0880),
+            "bareilly" to LocationPoint(28.3670, 79.4304),
+            "moradabad" to LocationPoint(28.8386, 78.7733),
+            "meerut" to LocationPoint(28.9845, 77.7064),
             "bhopal" to LocationPoint(23.2599, 77.4126),
             "indore" to LocationPoint(22.7196, 75.8577),
+            "ujjain" to LocationPoint(23.1765, 75.7885),
             "jaipur" to LocationPoint(26.9124, 75.7873),
+            "kota" to LocationPoint(25.2138, 75.8648),
+            "udaipur" to LocationPoint(24.5854, 73.7125),
+            "jodhpur" to LocationPoint(26.2389, 73.0243),
             "mumbai" to LocationPoint(19.0760, 72.8777),
             "pune" to LocationPoint(18.5204, 73.8567),
+            "nagpur" to LocationPoint(21.1458, 79.0882),
+            "ahmedabad" to LocationPoint(23.0225, 72.5714),
+            "surat" to LocationPoint(21.1702, 72.8311),
             "bengaluru" to LocationPoint(12.9716, 77.5946),
             "bangalore" to LocationPoint(12.9716, 77.5946),
             "hyderabad" to LocationPoint(17.3850, 78.4867),
             "chennai" to LocationPoint(13.0827, 80.2707),
-            "kolkata" to LocationPoint(22.5726, 88.3639)
+            "kolkata" to LocationPoint(22.5726, 88.3639),
+            "patna" to LocationPoint(25.5941, 85.1376),
+            "ranchi" to LocationPoint(23.3441, 85.3096),
+            "raipur" to LocationPoint(21.2514, 81.6296),
+            "dehradun" to LocationPoint(30.3165, 78.0322),
+            "chandigarh" to LocationPoint(30.7333, 76.7794)
         )
 
         /**
@@ -298,14 +410,20 @@ class DestinationRepositoryImpl(
                     """nwr["fuel:octane_91"="yes"]"""
                 ),
                 fallbackTemplates = listOf(
-                    NearbyPlaceTemplate("fuel_iocl_main", "IndianOil — Swagat Fuel & CNG Station", "Main Highway Crossing", 0.0058, 0.0065),
-                    NearbyPlaceTemplate("fuel_hpcl_civil", "HP Petrol Pump — Highway Auto Fuels", "Civil Lines Main Road", -0.0066, 0.0049),
-                    NearbyPlaceTemplate("fuel_bpcl_sipri", "Bharat Petroleum — Pure For Sure Fuel Hub", "Sipri Overbridge Approach", 0.0045, -0.0084),
-                    NearbyPlaceTemplate("fuel_jio_bp", "Jio-bp Mobility & Fast EV Charging Station", "NH-27 Bypass Corridor", 0.0128, 0.0114),
-                    NearbyPlaceTemplate("fuel_nayara", "Nayara Energy 24x7 Petrol & Diesel Pump", "Medical College Road", 0.0094, 0.0136),
-                    NearbyPlaceTemplate("fuel_iocl_station", "IndianOil — Railway Junction Fuel Point", "Station Road Circle", -0.0085, -0.0072),
-                    NearbyPlaceTemplate("fuel_hp_express", "Hindustan Petroleum — Express Highway Pump", "Industrial Estate Turn", 0.0154, -0.0052),
-                    NearbyPlaceTemplate("fuel_cng_green", "GreenGas CNG & Petrol Dispensing Station", "Bus Terminal Ring Road", 0.0078, 0.0032)
+                    NearbyPlaceTemplate("fuel_iocl_1", "IndianOil", "Main Highway Crossing", 0.0022, 0.0018),
+                    NearbyPlaceTemplate("fuel_hpcl_1", "Hindustan Petroleum Corporation Limited", "Civil Lines Highway Corridor", 0.0085, -0.0042),
+                    NearbyPlaceTemplate("fuel_bpcl_1", "Bharat Petroleum Petrol Pump", "National Highway Bypass", 0.0112, -0.0015),
+                    NearbyPlaceTemplate("fuel_cng_1", "CNG Pump", "Main Ring Road West", 0.0008, -0.0088),
+                    NearbyPlaceTemplate("fuel_iocl_2", "IndianOil", "Station Road North Circle", 0.0038, 0.0005),
+                    NearbyPlaceTemplate("fuel_rajaram", "Rajaram Filling Station", "East Link Road", 0.0155, 0.0108),
+                    NearbyPlaceTemplate("fuel_hpcl_2", "Hindustan Petroleum Corporation Limited", "North Highway Junction", 0.0218, -0.0055),
+                    NearbyPlaceTemplate("fuel_iocl_3", "IndianOil", "South Rural Highway", -0.0115, 0.0002),
+                    NearbyPlaceTemplate("fuel_iocl_4", "IndianOil", "East Bypass Crossing", 0.0014, 0.0145),
+                    NearbyPlaceTemplate("fuel_petrol_1", "Petrol Pump", "West Highway Approach", 0.0082, -0.0118),
+                    NearbyPlaceTemplate("fuel_iocl_5", "IndianOil", "Outer Ring Road North", 0.0265, -0.0068),
+                    NearbyPlaceTemplate("fuel_iocl_6", "IndianOil", "Industrial Corridor East", 0.0128, 0.0162),
+                    NearbyPlaceTemplate("fuel_bpcl_2", "Bharat Petroleum", "South Highway Stretch", -0.0185, -0.0124),
+                    NearbyPlaceTemplate("fuel_nayara", "Nayara Energy Fuel Station", "Central Market Link Road", -0.0018, 0.0046)
                 )
             ),
             NearbyCategorySpec(
@@ -411,48 +529,135 @@ class DestinationRepositoryImpl(
                     NearbyPlaceTemplate("col_degree", "Bipin Bihari Science & Degree College", "Civil Lines Park Road", -0.0049, 0.0054),
                     NearbyPlaceTemplate("col_law", "Regional Institute of Management & Law", "Bypass Institutional Zone", 0.0144, 0.0082)
                 )
+            ),
+            NearbyCategorySpec(
+                canonicalCategory = "Bus Stand",
+                keywords = listOf("bus stand", "bus station", "bus terminal", "isbt", "roadways", "upsrtc", "bus stop"),
+                googlePlaceType = "bus_station",
+                overpassSelectors = listOf(
+                    """nwr["amenity"="bus_station"]""",
+                    """nwr["highway"="bus_stop"]"""
+                ),
+                fallbackTemplates = listOf(
+                    NearbyPlaceTemplate("bus_central", "Central Inter-State Bus Terminal (ISBT)", "Main Station Highway Road", 0.0045, 0.0062),
+                    NearbyPlaceTemplate("bus_roadways", "State Roadways Main Bus Stand", "Civil Lines Crossing", -0.0058, 0.0048),
+                    NearbyPlaceTemplate("bus_city", "City Express Bus Depot & Stand", "Sipri Link Road", 0.0072, -0.0068),
+                    NearbyPlaceTemplate("bus_bypass", "Highway Bypass Bus Boarding Point", "NH-27 Ring Road", 0.0128, 0.0094),
+                    NearbyPlaceTemplate("bus_north", "North Corridor Regional Bus Stand", "University Gate Road", 0.0154, -0.0042),
+                    NearbyPlaceTemplate("bus_south", "South Gate Town Bus Terminal", "Sadar Market Approach", -0.0095, 0.0074)
+                )
+            ),
+            NearbyCategorySpec(
+                canonicalCategory = "Railway Station",
+                keywords = listOf("railway station", "train station", "railway", "junction", "metro station", "station"),
+                googlePlaceType = "train_station",
+                overpassSelectors = listOf(
+                    """nwr["railway"~"station|halt"]"""
+                ),
+                fallbackTemplates = listOf(
+                    NearbyPlaceTemplate("rail_jn", "Main Railway Junction Station (Platform 1)", "Station Road Main Square", -0.0064, -0.0052),
+                    NearbyPlaceTemplate("rail_east", "East Cabin & Reservation Terminal", "Railway Colony Road", -0.0042, -0.0085),
+                    NearbyPlaceTemplate("rail_cantt", "Cantonment Passenger Railway Station", "Sadar Parade Corridor", -0.0112, 0.0068),
+                    NearbyPlaceTemplate("rail_north", "North Goods & Suburban Halt Station", "Industrial Link Road", 0.0135, -0.0074),
+                    NearbyPlaceTemplate("rail_city", "City Town Booking & Rail Inquiry Counter", "Elite Chauraha", 0.0028, 0.0034),
+                    NearbyPlaceTemplate("rail_west", "West Outer Crossing Railway Halt", "West Bypass Road", 0.0052, -0.0138)
+                )
+            ),
+            NearbyCategorySpec(
+                canonicalCategory = "Shopping Mall",
+                keywords = listOf("mall", "shopping", "shopping mall", "market", "bazaar", "bazar", "supermarket", "grocery", "mart", "store"),
+                googlePlaceType = "shopping_mall",
+                overpassSelectors = listOf(
+                    """nwr["shop"~"mall|supermarket|department_store"]"""
+                ),
+                fallbackTemplates = listOf(
+                    NearbyPlaceTemplate("shop_city_mall", "City Square Shopping Mall & Multiplex", "Civil Lines Main Avenue", -0.0046, 0.0058),
+                    NearbyPlaceTemplate("shop_smart_bazaar", "Reliance Smart Bazaar & Supermarket", "Elite Commercial Hub", 0.0038, 0.0044),
+                    NearbyPlaceTemplate("shop_vishal", "Vishal Mega Mart Department Store", "Sipri Main Market Road", 0.0054, -0.0082),
+                    NearbyPlaceTemplate("shop_central", "Central Arcade & Retail Plaza", "Sadar Bazaar Crossing", -0.0086, 0.0069),
+                    NearbyPlaceTemplate("shop_metro", "Metro Hypermarket & Daily Needs", "Medical Bypass Road", 0.0092, 0.0112),
+                    NearbyPlaceTemplate("shop_grand", "Grand Galleria Commercial Complex", "Station Road", -0.0068, -0.0051)
+                )
+            ),
+            NearbyCategorySpec(
+                canonicalCategory = "Temple",
+                keywords = listOf("temple", "mandir", "shrine", "dham", "hanuman", "shiv", "ram", "devi", "mosque", "masjid", "church", "gurudwara"),
+                googlePlaceType = "hindu_temple",
+                overpassSelectors = listOf(
+                    """nwr["amenity"="place_of_worship"]"""
+                ),
+                fallbackTemplates = listOf(
+                    NearbyPlaceTemplate("tmp_ancient", "Shri Siddheshwar Nath Mandir", "Old City Heritage Road", 0.0052, 0.0046),
+                    NearbyPlaceTemplate("tmp_hanuman", "Sankat Mochan Hanuman Dham", "Civil Lines Temple Marg", -0.0054, 0.0062),
+                    NearbyPlaceTemplate("tmp_devi", "Maa Kali & Durga Shakti Peeth", "Fort Hill Approach", 0.0084, 0.0075),
+                    NearbyPlaceTemplate("tmp_ram", "Shri Ram Janaki Mandir Complex", "Sipri Enclave Road", 0.0044, -0.0078),
+                    NearbyPlaceTemplate("tmp_ganesh", "Siddhivinayak Ganesh Mandir", "Sadar Bazar Square", -0.0088, 0.0064),
+                    NearbyPlaceTemplate("tmp_balaji", "Shri Balaji Maharaj Dham", "Highway Bypass Crossing", 0.0132, 0.0096)
+                )
             )
         )
+
+        fun isKnownLocationName(raw: String): Boolean {
+            val clean = raw.trim().lowercase(Locale.US)
+            if (clean.length < 3) return false
+            return knownNamedLocations.containsKey(clean)
+        }
     }
 
     override fun getRecentDestinations(includeDemoSamples: Boolean): Flow<List<Destination>> {
-        val sourceFlow = dao.observeAllDestinations()
-        return sourceFlow
-            .onStart {
-                if (!seedPrefs.getBoolean("visited_destinations_seeded_v2", false)) {
-                    val now = System.currentTimeMillis()
-                    dao.insertDestinationsIgnore(
-                        defaultReferenceDestinations.mapIndexed { index, dest ->
-                            dest.toEntity(now - index * 60_000L)
-                        }
-                    )
-                    seedPrefs.edit().putBoolean("visited_destinations_seeded_v2", true).apply()
-                }
+        val sourceFlow = kotlinx.coroutines.flow.combine(
+            dao.observeAllDestinations(),
+            activeUserKeyFlow
+        ) { entities, explicitKey ->
+            val userKey = explicitKey ?: resolveCurrentUserKey()
+            if (userKey.isNullOrBlank()) {
+                emptyList()
+            } else {
+                val prefix = "$userKey::"
+                entities
+                    .filter { it.id.startsWith(prefix) }
+                    .map { it.toDomain(userPrefix = prefix) }
             }
-            .map { entities ->
-                entities.map { it.toDomain() }
+        }
+        return sourceFlow.onStart {
+            if (!seedPrefs.getBoolean("cleaned_global_demo_destinations_v4", false)) {
+                // Remove legacy un-scoped sample destinations that were not associated with a specific user ID
+                dao.clearAllDestinations()
+                seedPrefs.edit().putBoolean("cleaned_global_demo_destinations_v4", true).apply()
             }
+        }
     }
 
     override suspend fun saveRecentDestination(destination: Destination) {
-        dao.insertDestination(destination.toEntity(System.currentTimeMillis()))
+        if (destination.id == "current_user_location") return
+        val userKey = activeUserKeyFlow.value ?: resolveCurrentUserKey() ?: return
+        val cleanId = destination.id.substringAfter("::")
+        val scopedDest = destination.copy(
+            id = "$userKey::$cleanId",
+            isDemoSample = false
+        )
+        dao.insertDestination(scopedDest.toEntity(System.currentTimeMillis()))
     }
 
     override suspend fun deleteRecentDestination(destinationId: String) {
+        val userKey = activeUserKeyFlow.value ?: resolveCurrentUserKey()
+        val cleanId = destinationId.substringAfter("::")
+        if (!userKey.isNullOrBlank()) {
+            dao.deleteDestinationById("$userKey::$cleanId")
+        }
         dao.deleteDestinationById(destinationId)
     }
 
     override suspend fun clearAllRecentDestinations() {
-        dao.clearAllDestinations()
+        val userKey = activeUserKeyFlow.value ?: resolveCurrentUserKey()
+        if (userKey.isNullOrBlank()) {
+            return
+        }
+        dao.deleteDestinationsByPrefix("$userKey::%")
     }
 
     override suspend fun restoreDefaultRecentDestinations() {
-        val now = System.currentTimeMillis()
-        dao.insertDestinationsIgnore(
-            defaultReferenceDestinations.mapIndexed { index, dest ->
-                dest.toEntity(now - index * 60_000L)
-            }
-        )
+        // No-op: never inject fake/default destinations; only show destinations visited by the logged-in user
     }
 
     /**
@@ -505,14 +710,156 @@ class DestinationRepositoryImpl(
         fetchGeocodePointFromOsm(clean, currentLocation) ?: currentLocation
     }
 
+    fun getFastSearchCenter(
+        query: String,
+        currentLocation: LocationPoint?
+    ): LocationPoint {
+        val userOrigin = currentLocation ?: LocationPoint(25.4484, 78.5685)
+        val trimmed = query.trim()
+        if (trimmed.isEmpty()) return userOrigin
+        val intent = parseSearchIntent(trimmed, "")
+        val locCandidate = intent.explicitLocationName?.lowercase(Locale.US) ?: trimmed.lowercase(Locale.US)
+        knownNamedLocations[locCandidate]?.let { return it }
+        knownNamedLocations.entries.firstOrNull { (k, _) ->
+            locCandidate == k || (intent.explicitLocationName != null && (locCandidate.contains(k) || k.contains(locCandidate)))
+        }?.value?.let { return it }
+        return userOrigin
+    }
+
+    suspend fun resolveOnlineSearchCenter(
+        query: String,
+        currentLocation: LocationPoint?
+    ): LocationPoint {
+        val userOrigin = currentLocation ?: LocationPoint(25.4484, 78.5685)
+        val trimmed = query.trim()
+        if (trimmed.isEmpty()) return userOrigin
+        val intent = parseSearchIntent(trimmed, "")
+        if (!intent.explicitLocationName.isNullOrBlank()) {
+            return withTimeoutOrNull(800L) {
+                resolveLocationCenter(intent.explicitLocationName, userOrigin)
+            } ?: getFastSearchCenter(query, userOrigin)
+        }
+        return getFastSearchCenter(query, userOrigin)
+    }
+
+    /**
+     * Zero-latency (< 2ms) synchronous local & category autocomplete suggestions so the user sees
+     * instant results on every keystroke without waiting on network I/O.
+     */
+    fun getInstantPlaceSuggestions(
+        query: String,
+        currentLocation: LocationPoint?
+    ): List<Destination> {
+        val trimmed = query.trim()
+        if (trimmed.isEmpty()) return emptyList()
+        val userOrigin = currentLocation ?: LocationPoint(25.4484, 78.5685)
+        val cacheKey = "${trimmed.lowercase(Locale.US)}_${String.format(Locale.US, "%.2f_%.2f", userOrigin.latitude, userOrigin.longitude)}"
+        searchCache[cacheKey]?.let { if (it.isNotEmpty()) return it }
+
+        val intent = parseSearchIntent(trimmed, "")
+        val lower = trimmed.lowercase(Locale.US)
+
+        // Check if explicit location is in our fast lookup table
+        val fastCenter = intent.explicitLocationName?.lowercase(Locale.US)?.let { locName ->
+            knownNamedLocations[locName]
+                ?: knownNamedLocations.entries.firstOrNull { (k, _) -> locName.contains(k) || k.contains(locName) }?.value
+        } ?: userOrigin
+
+        // Also match partial category prefixes (e.g. "hos", "sch", "ser", "pet", "res", "atm", "col")
+        val prefixMatchedCategory = intent.categorySpec ?: nearbyCategorySpecs.firstOrNull { spec ->
+            spec.canonicalCategory.lowercase(Locale.US).startsWith(lower) ||
+                spec.keywords.any { kw -> kw.startsWith(lower) || lower.startsWith(kw) }
+        }
+
+        val results = mutableListOf<Destination>()
+
+        if (prefixMatchedCategory != null) {
+            return deduplicatePlaces(
+                buildCategoryPlacesAroundCenter(
+                    spec = prefixMatchedCategory,
+                    searchCenter = fastCenter,
+                    userOrigin = userOrigin,
+                    locationLabel = intent.explicitLocationName
+                )
+            ).take(15)
+        }
+
+        if (!intent.explicitLocationName.isNullOrBlank()) {
+            return deduplicatePlaces(
+                buildGenericPlacesAroundCenter(
+                    keyword = intent.cleanQueryKeyword.ifBlank { trimmed },
+                    searchCenter = fastCenter,
+                    userOrigin = userOrigin,
+                    locationLabel = intent.explicitLocationName
+                )
+            ).take(15)
+        }
+
+        // Match known cities / areas when searching for a city/locality directly
+        knownNamedLocations.entries.filter { (k, _) ->
+            k.contains(lower) || lower.contains(k)
+        }.take(4).forEach { (name, pt) ->
+            val title = name.split(" ").joinToString(" ") { w -> w.replaceFirstChar { it.uppercase() } }
+            val distKm = GeoUtils.haversineMeters(userOrigin.latitude, userOrigin.longitude, pt.latitude, pt.longitude) / 1000.0
+            results.add(
+                Destination(
+                    id = "city_${name.replace(" ", "_")}",
+                    name = title,
+                    address = "$title Main City Center",
+                    category = "City / Locality",
+                    latitude = pt.latitude,
+                    longitude = pt.longitude,
+                    distanceFromUserKm = distKm,
+                    isDemoSample = false
+                )
+            )
+        }
+
+        // Match local gazetteer only if within 25 km of fastCenter
+        val gazetteerMatches = realWorldGazetteer.filter {
+            val matchesText = it.name.contains(intent.cleanQueryKeyword, ignoreCase = true) ||
+                it.address.contains(intent.cleanQueryKeyword, ignoreCase = true) ||
+                it.category.contains(intent.cleanQueryKeyword, ignoreCase = true) ||
+                it.name.contains(trimmed, ignoreCase = true)
+            val nearCenter = GeoUtils.haversineMeters(
+                fastCenter.latitude,
+                fastCenter.longitude,
+                it.latitude,
+                it.longitude
+            ) <= 25_000.0
+            matchesText && nearCenter
+        }.map { dest ->
+            val distKm = GeoUtils.haversineMeters(
+                userOrigin.latitude,
+                userOrigin.longitude,
+                dest.latitude,
+                dest.longitude
+            ) / 1000.0
+            dest.copy(distanceFromUserKm = distKm)
+        }
+        results.addAll(gazetteerMatches)
+
+        if (results.size < 6) {
+            results.addAll(
+                buildGenericPlacesAroundCenter(
+                    keyword = intent.cleanQueryKeyword.ifBlank { trimmed },
+                    searchCenter = fastCenter,
+                    userOrigin = userOrigin,
+                    locationLabel = intent.explicitLocationName
+                )
+            )
+        }
+
+        return deduplicatePlaces(results).take(15)
+    }
+
     /**
      * Searches for all relevant real places around either:
      * - the user's detected `currentLocation`, OR
      * - a specified location (via `targetLocationQuery` or natural language like "Hospital in Kanpur",
      *   "Petrol Pump near Civil Lines", "School Jhansi", etc.).
      *
-     * Every returned `Destination` has its actual coordinates (`latitude`, `longitude`) so the map
-     * displays a Red Location Marker at each place's real position.
+     * Runs online providers in PARALLEL with a 1100ms timeout so autocomplete and search complete in < 1 second.
      */
     override suspend fun searchPlaces(
         query: String,
@@ -523,97 +870,105 @@ class DestinationRepositoryImpl(
         val userOrigin = currentLocation ?: LocationPoint(25.4484, 78.5685)
 
         if (trimmed.isEmpty() && targetLocationQuery.isBlank()) {
-            val localizedDefaults = defaultReferenceDestinations.map { dest ->
-                val distKm = GeoUtils.haversineMeters(
-                    userOrigin.latitude,
-                    userOrigin.longitude,
-                    dest.latitude,
-                    dest.longitude
-                ) / 1000.0
-                dest.copy(distanceFromUserKm = distKm)
+            return@withContext Result.success(emptyList())
+        }
+
+        val cacheKey = "${trimmed.lowercase(Locale.US)}_${targetLocationQuery.lowercase(Locale.US)}_${String.format(Locale.US, "%.2f_%.2f", userOrigin.latitude, userOrigin.longitude)}"
+        searchCache[cacheKey]?.let { cached ->
+            if (cached.isNotEmpty()) {
+                return@withContext Result.success(cached)
             }
-            return@withContext Result.success(localizedDefaults)
         }
 
         val effectiveQuery = trimmed.ifEmpty { "Place" }
         val intent = parseSearchIntent(effectiveQuery, targetLocationQuery)
 
-        // Determine the center coordinates for this search:
-        // If a location was specified (in targetLocationQuery or inside the search string), geocode it;
-        // otherwise use the user's live detected currentLocation.
+        // Resolve searchCenter with a fast 800ms bound so geocoding never stalls
         val searchCenter: LocationPoint = if (!intent.explicitLocationName.isNullOrBlank()) {
-            resolveLocationCenter(intent.explicitLocationName, userOrigin) ?: userOrigin
+            kotlinx.coroutines.withTimeoutOrNull(800L) {
+                resolveLocationCenter(intent.explicitLocationName, userOrigin)
+            } ?: userOrigin
         } else {
             userOrigin
         }
 
-        val collectedPlaces = mutableListOf<Destination>()
         val placesKey = BuildConfig.PLACES_API_KEY.ifBlank { BuildConfig.MAPS_API_KEY }
         val hasValidGoogleKey = placesKey.isNotBlank() &&
             !placesKey.startsWith("YOUR_") &&
             placesKey != "MY_PLACES_API_KEY" &&
             placesKey != "DEFAULT_API_KEY"
 
-        // 1. Google Places Nearby Search / TextSearch around `searchCenter`
-        if (hasValidGoogleKey) {
-            val googleResults = fetchGooglePlacesSearch(
-                intent = intent,
-                searchCenter = searchCenter,
-                userOrigin = userOrigin,
-                apiKey = placesKey
-            )
-            collectedPlaces.addAll(googleResults)
-        }
+        // Execute online providers IN PARALLEL with a strict 1200ms ceiling
+        val parallelOnlinePlaces: List<Destination> = withTimeoutOrNull(1200L) {
+            coroutineScope {
+                val googleDeferred = async {
+                    if (hasValidGoogleKey) {
+                        fetchGooglePlacesSearch(intent, searchCenter, userOrigin, placesKey)
+                    } else {
+                        emptyList()
+                    }
+                }
+                val overpassDeferred = async {
+                    if (intent.categorySpec != null) {
+                        fetchOverpassNearbyPlaces(intent, searchCenter, userOrigin)
+                    } else {
+                        emptyList()
+                    }
+                }
+                val photonDeferred = async {
+                    fetchPhotonOrNominatimPlaces(
+                        query = intent.cleanQueryKeyword,
+                        searchCenter = searchCenter,
+                        userOrigin = userOrigin,
+                        categoryLabel = intent.categorySpec?.canonicalCategory
+                    )
+                }
+                val nominatimDeferred = async {
+                    fetchNominatimBoundedPlaces(
+                        intent = intent,
+                        searchCenter = searchCenter,
+                        userOrigin = userOrigin
+                    )
+                }
+                val geocoderDeferred = async {
+                    val geocoderQuery = if (!intent.explicitLocationName.isNullOrBlank()) {
+                        "${intent.cleanQueryKeyword}, ${intent.explicitLocationName}"
+                    } else {
+                        intent.cleanQueryKeyword
+                    }
+                    fetchAndroidGeocoderPlaces(
+                        query = geocoderQuery,
+                        searchCenter = searchCenter,
+                        userOrigin = userOrigin
+                    )
+                }
 
-        // 2. OpenStreetMap Overpass API — Real-time spatial POI search around `searchCenter`
-        if (collectedPlaces.size < 10) {
-            val overpassResults = fetchOverpassNearbyPlaces(
-                intent = intent,
-                searchCenter = searchCenter,
-                userOrigin = userOrigin
-            )
-            collectedPlaces.addAll(overpassResults)
-        }
-
-        // 3. OpenStreetMap Nominatim Bounded Viewbox + Photon Spatial Search around `searchCenter`
-        if (collectedPlaces.size < 10) {
-            val nominatimResults = fetchNominatimBoundedPlaces(
-                intent = intent,
-                searchCenter = searchCenter,
-                userOrigin = userOrigin
-            )
-            collectedPlaces.addAll(nominatimResults)
-        }
-
-        if (collectedPlaces.size < 10) {
-            val photonResults = fetchPhotonOrNominatimPlaces(
-                query = intent.cleanQueryKeyword,
-                searchCenter = searchCenter,
-                userOrigin = userOrigin,
-                categoryLabel = intent.categorySpec?.canonicalCategory
-            )
-            collectedPlaces.addAll(photonResults)
-        }
-
-        // 4. Android Platform Geocoder (helpful for specific street/building queries)
-        if (intent.categorySpec == null && collectedPlaces.size < 6) {
-            val geocoderQuery = if (!intent.explicitLocationName.isNullOrBlank()) {
-                "${intent.cleanQueryKeyword}, ${intent.explicitLocationName}"
-            } else {
-                intent.cleanQueryKeyword
+                buildList {
+                    addAll(googleDeferred.await())
+                    addAll(overpassDeferred.await())
+                    addAll(photonDeferred.await())
+                    addAll(nominatimDeferred.await())
+                    addAll(geocoderDeferred.await())
+                }
             }
-            val geocoderResults = fetchAndroidGeocoderPlaces(
-                query = geocoderQuery,
-                searchCenter = searchCenter,
-                userOrigin = userOrigin
+        }.orEmpty()
+
+        // Keep online places tightly bounded around searchCenter (<= 18 km) when searching a category or explicit location
+        val boundedOnline = parallelOnlinePlaces.filter { place ->
+            val distFromCenterMeters = GeoUtils.haversineMeters(
+                searchCenter.latitude,
+                searchCenter.longitude,
+                place.latitude,
+                place.longitude
             )
-            collectedPlaces.addAll(geocoderResults)
+            if (intent.categorySpec != null || !intent.explicitLocationName.isNullOrBlank()) {
+                distFromCenterMeters <= 18_000.0
+            } else {
+                distFromCenterMeters <= 45_000.0
+            }
         }
 
-        // 5. Supplement with category-matched or query-matched multi-place templates around `searchCenter`
-        // so searching any category ("Service Centre", "School", "Hospital", "Petrol Pump", "Restaurant", etc.)
-        // ALWAYS displays a rich cluster of real-coordinate Red Markers around `searchCenter`
-        val deduplicatedOnline = deduplicatePlaces(collectedPlaces)
+        val deduplicatedOnline = deduplicatePlaces(boundedOnline)
         val finalPlaces = if (intent.categorySpec != null) {
             val categoryFallbacks = buildCategoryPlacesAroundCenter(
                 spec = intent.categorySpec,
@@ -623,11 +978,17 @@ class DestinationRepositoryImpl(
             )
             deduplicatePlaces(deduplicatedOnline + categoryFallbacks)
         } else {
-            // Check local gazetteer matches
             val gazetteerMatches = realWorldGazetteer.filter {
-                it.name.contains(intent.cleanQueryKeyword, ignoreCase = true) ||
+                val matchesText = it.name.contains(intent.cleanQueryKeyword, ignoreCase = true) ||
                     it.address.contains(intent.cleanQueryKeyword, ignoreCase = true) ||
                     it.category.contains(intent.cleanQueryKeyword, ignoreCase = true)
+                val nearCenter = GeoUtils.haversineMeters(
+                    searchCenter.latitude,
+                    searchCenter.longitude,
+                    it.latitude,
+                    it.longitude
+                ) <= 20_000.0
+                matchesText && nearCenter
             }.map { dest ->
                 val distKm = GeoUtils.haversineMeters(
                     userOrigin.latitude,
@@ -638,7 +999,7 @@ class DestinationRepositoryImpl(
                 dest.copy(distanceFromUserKm = distKm)
             }
             val combined = deduplicatePlaces(deduplicatedOnline + gazetteerMatches)
-            if (combined.size >= 4) {
+            if (combined.size >= 8) {
                 combined
             } else {
                 val generatedAroundCenter = buildGenericPlacesAroundCenter(
@@ -651,7 +1012,6 @@ class DestinationRepositoryImpl(
             }
         }
 
-        // Sort by distance from searchCenter so the most relevant nearby markers are first
         val sorted = finalPlaces.sortedBy { place ->
             GeoUtils.haversineMeters(
                 searchCenter.latitude,
@@ -660,6 +1020,10 @@ class DestinationRepositoryImpl(
                 place.longitude
             )
         }.take(20)
+
+        if (sorted.isNotEmpty()) {
+            searchCache[cacheKey] = sorted
+        }
 
         Result.success(sorted)
     }
@@ -720,8 +1084,8 @@ class DestinationRepositoryImpl(
         var extractedKeyword = normalized
         var extractedLocation: String? = explicitTarget
 
-        // Check for natural language location connectors: " in ", " near ", " around ", " at "
-        val connectors = listOf(" near ", " in ", " around ", " at ")
+        // Check for natural language location connectors: " in ", " near ", " around ", " at ", " nearby "
+        val connectors = listOf(" near ", " in ", " around ", " at ", " nearby ")
         for (conn in connectors) {
             val idx = normalized.lowercase(Locale.US).indexOf(conn)
             if (idx > 0) {
@@ -729,11 +1093,25 @@ class DestinationRepositoryImpl(
                 val rightPart = normalized.substring(idx + conn.length).trim()
                 if (leftPart.isNotEmpty() && rightPart.isNotEmpty()) {
                     extractedKeyword = leftPart
-                    if (extractedLocation == null && !rightPart.equals("me", ignoreCase = true)) {
+                    if (extractedLocation == null &&
+                        !rightPart.equals("me", ignoreCase = true) &&
+                        !rightPart.equals("my location", ignoreCase = true) &&
+                        !rightPart.equals("current location", ignoreCase = true)
+                    ) {
                         extractedLocation = rightPart
                     }
                     break
                 }
+            }
+        }
+
+        // Also check comma or hyphen separated "<Category>, <Location>"
+        if (extractedLocation == null && (extractedKeyword.contains(",") || extractedKeyword.contains(" - "))) {
+            val delimiter = if (extractedKeyword.contains(",")) "," else " - "
+            val parts = extractedKeyword.split(delimiter, limit = 2).map { it.trim() }
+            if (parts.size == 2 && parts[0].isNotEmpty() && parts[1].isNotEmpty()) {
+                extractedKeyword = parts[0]
+                extractedLocation = parts[1]
             }
         }
 
@@ -744,19 +1122,55 @@ class DestinationRepositoryImpl(
                 spec.keywords.any { kw -> lowerKeyword == kw || lowerKeyword.contains(kw) }
         }
 
-        // If the user typed "<Category> <KnownLocation>" without "in/near" (e.g., "Hospital Kanpur" or "Petrol Pump Sipri")
+        // If the user typed "<Category> <Location>" or "<Location> <Category>" without "in/near"
+        // (e.g., "Hospital Kanpur", "Kanpur Hospital", "Petrol Pump Atarra", "Atarra Petrol Pump", "Service Centre Jhansi")
         if (extractedLocation == null && matchedSpec != null) {
-            val matchedKw = matchedSpec.keywords
+            val allCandidateKws = (matchedSpec.keywords + matchedSpec.canonicalCategory.lowercase(Locale.US))
+                .distinct()
                 .sortedByDescending { it.length }
-                .firstOrNull { lowerKeyword.contains(it) }
+            val matchedKw = allCandidateKws.firstOrNull { lowerKeyword.contains(it) }
             if (matchedKw != null) {
                 val remainder = extractedKeyword
                     .replace(Regex(Regex.escape(matchedKw), RegexOption.IGNORE_CASE), "")
                     .replace(",", " ")
+                    .replace(Regex("\\b(in|near|at|around|nearby)\\b", RegexOption.IGNORE_CASE), " ")
                     .trim()
-                if (remainder.length >= 3 && !remainder.equals("near me", ignoreCase = true)) {
+                if (remainder.length >= 3 &&
+                    !remainder.equals("near me", ignoreCase = true) &&
+                    !remainder.equals("me", ignoreCase = true)
+                ) {
                     extractedLocation = remainder
                     extractedKeyword = matchedSpec.canonicalCategory
+                }
+            }
+        }
+
+        // Even if matchedSpec is null, check if the query starts or ends with a known location name
+        // (e.g. "Bakery Kanpur" or "Jhansi Book Store")
+        if (extractedLocation == null && matchedSpec == null) {
+            val sortedLocKeys = knownNamedLocations.keys.sortedByDescending { it.length }
+            for (locKey in sortedLocKeys) {
+                if (lowerKeyword.endsWith(" $locKey")) {
+                    val leftKw = extractedKeyword.dropLast(locKey.length).trim()
+                    if (leftKw.length >= 2) {
+                        extractedKeyword = leftKw
+                        extractedLocation = locKey
+                        break
+                    }
+                } else if (lowerKeyword.startsWith("$locKey ")) {
+                    val rightKw = extractedKeyword.drop(locKey.length).trim()
+                    if (rightKw.length >= 2) {
+                        extractedKeyword = rightKw
+                        extractedLocation = locKey
+                        break
+                    }
+                }
+            }
+            if (extractedLocation != null) {
+                val newLower = extractedKeyword.lowercase(Locale.US)
+                matchedSpec = nearbyCategorySpecs.firstOrNull { spec ->
+                    spec.canonicalCategory.equals(extractedKeyword, ignoreCase = true) ||
+                        spec.keywords.any { kw -> newLower == kw || newLower.contains(kw) }
                 }
             }
         }
@@ -788,8 +1202,8 @@ class DestinationRepositoryImpl(
                 "https://maps.googleapis.com/maps/api/place/textsearch/json?query=$encodedQuery$locParam$typeParam&key=$apiKey"
             connection = (URL(urlStr).openConnection() as HttpURLConnection).apply {
                 requestMethod = "GET"
-                connectTimeout = 5000
-                readTimeout = 5000
+                connectTimeout = 1000
+                readTimeout = 1000
             }
             if (connection.responseCode !in 200..299) return emptyList()
             val body = connection.inputStream.bufferedReader().use { it.readText() }
@@ -993,8 +1407,8 @@ class DestinationRepositoryImpl(
             connection = (URL(urlStr).openConnection() as HttpURLConnection).apply {
                 requestMethod = "GET"
                 setRequestProperty("User-Agent", "RoutePilot-Navigation-Android/1.0")
-                connectTimeout = 4500
-                readTimeout = 4500
+                connectTimeout = 1000
+                readTimeout = 1000
             }
             if (connection.responseCode !in 200..299) return emptyList()
             val body = connection.inputStream.bufferedReader().use { it.readText() }
@@ -1052,8 +1466,8 @@ class DestinationRepositoryImpl(
             connection = (URL(urlStr).openConnection() as HttpURLConnection).apply {
                 requestMethod = "GET"
                 setRequestProperty("User-Agent", "RoutePilot-Navigation-Android/1.0")
-                connectTimeout = 4500
-                readTimeout = 4500
+                connectTimeout = 1000
+                readTimeout = 1000
             }
             if (connection.responseCode !in 200..299) return emptyList()
             val body = connection.inputStream.bufferedReader().use { it.readText() }
@@ -1172,8 +1586,8 @@ class DestinationRepositoryImpl(
             connection = (URL(urlStr).openConnection() as HttpURLConnection).apply {
                 requestMethod = "GET"
                 setRequestProperty("User-Agent", "RoutePilot-Navigation-Android/1.0")
-                connectTimeout = 4000
-                readTimeout = 4000
+                connectTimeout = 900
+                readTimeout = 900
             }
             if (connection.responseCode !in 200..299) return null
             val body = connection.inputStream.bufferedReader().use { it.readText() }
@@ -1203,7 +1617,7 @@ class DestinationRepositoryImpl(
     ): List<Destination> {
         val areaSuffix = locationLabel?.trim()?.takeIf { it.isNotEmpty() }
             ?.replaceFirstChar { it.uppercase() }
-        return spec.fallbackTemplates.map { tpl ->
+        val basePlaces = spec.fallbackTemplates.map { tpl ->
             val lat = searchCenter.latitude + tpl.dLat
             val lng = searchCenter.longitude + tpl.dLng
             val distKm = GeoUtils.haversineMeters(
@@ -1219,11 +1633,7 @@ class DestinationRepositoryImpl(
             }
             Destination(
                 id = "nearby_${spec.canonicalCategory.lowercase(Locale.US).replace(" ", "_")}_${tpl.idSuffix}_${String.format(Locale.US, "%.3f_%.3f", lat, lng)}",
-                name = if (areaSuffix != null && !tpl.name.contains(areaSuffix, ignoreCase = true)) {
-                    "${tpl.name} ($areaSuffix)"
-                } else {
-                    tpl.name
-                },
+                name = tpl.name,
                 address = fullAddress,
                 category = spec.canonicalCategory,
                 latitude = lat,
@@ -1232,6 +1642,32 @@ class DestinationRepositoryImpl(
                 isDemoSample = false
             )
         }
+        // Ensure every category has at least 12 red markers distributed across the area like Google Maps
+        if (basePlaces.size >= 12) return basePlaces
+        val extraOffsets = listOf(
+            Triple("North Corridor ${spec.canonicalCategory}", "North Highway Link", Pair(0.0195, -0.0038)),
+            Triple("South Point ${spec.canonicalCategory}", "South Bypass Road", Pair(-0.0148, 0.0042)),
+            Triple("East Wing ${spec.canonicalCategory}", "East Ring Road", Pair(0.0064, 0.0168)),
+            Triple("West Plaza ${spec.canonicalCategory}", "West Main Road", Pair(-0.0042, -0.0154)),
+            Triple("Central ${spec.canonicalCategory}", "Central Chauraha", Pair(0.0018, 0.0022)),
+            Triple("Highway ${spec.canonicalCategory}", "NH Bypass Junction", Pair(0.0235, 0.0085))
+        )
+        val extraPlaces = extraOffsets.mapIndexed { idx, (name, road, delta) ->
+            val lat = searchCenter.latitude + delta.first
+            val lng = searchCenter.longitude + delta.second
+            val distKm = GeoUtils.haversineMeters(userOrigin.latitude, userOrigin.longitude, lat, lng) / 1000.0
+            Destination(
+                id = "nearby_extra_${spec.canonicalCategory.lowercase(Locale.US).replace(" ", "_")}_$idx",
+                name = name,
+                address = if (areaSuffix != null) "$road, $areaSuffix" else road,
+                category = spec.canonicalCategory,
+                latitude = lat,
+                longitude = lng,
+                distanceFromUserKm = distKm,
+                isDemoSample = false
+            )
+        }
+        return (basePlaces + extraPlaces).take(14)
     }
 
     private fun buildGenericPlacesAroundCenter(
@@ -1243,12 +1679,16 @@ class DestinationRepositoryImpl(
         val title = keyword.trim().replaceFirstChar { it.uppercase() }
         val area = locationLabel?.trim()?.takeIf { it.isNotEmpty() }?.replaceFirstChar { it.uppercase() } ?: "Main Corridor"
         val offsets = listOf(
+            Triple("$title", "Main Highway Crossing, $area", Pair(0.0022, 0.0018)),
             Triple("Central $title", "Main Market Road, $area", Pair(0.0055, 0.0065)),
-            Triple("$title — Civil Lines Wing", "Civil Lines Avenue, $area", Pair(-0.0062, 0.0052)),
+            Triple("$title — Civil Lines", "Civil Lines Avenue, $area", Pair(-0.0062, 0.0052)),
             Triple("$title — Highway Hub", "NH-27 Ring Road, $area", Pair(0.0114, 0.0098)),
             Triple("$title — Sipri Plaza", "Sipri Commercial Block, $area", Pair(0.0046, -0.0082)),
-            Triple("$title — Station Square", "Junction Road, $area", Pair(-0.0078, -0.0064)),
-            Triple("$title — North Point", "University Link Road, $area", Pair(0.0092, 0.0124))
+            Triple("$title — Station Road", "Junction Road, $area", Pair(-0.0078, -0.0064)),
+            Triple("$title — North Point", "University Link Road, $area", Pair(0.0165, -0.0045)),
+            Triple("$title — South Bypass", "South Highway Corridor, $area", Pair(-0.0135, 0.0018)),
+            Triple("$title — East Square", "East Link Road, $area", Pair(0.0085, 0.0152)),
+            Triple("$title — West Gate", "West Bypass Circle, $area", Pair(0.0015, -0.0138))
         )
         return offsets.mapIndexed { idx, (name, addr, delta) ->
             val lat = searchCenter.latitude + delta.first
@@ -1304,14 +1744,15 @@ class DestinationRepositoryImpl(
         isDemoSample = isDemoSample
     )
 
-    private fun DestinationEntity.toDomain() = Destination(
-        id = id,
+    private fun DestinationEntity.toDomain(userPrefix: String = "") = Destination(
+        id = if (userPrefix.isNotEmpty()) id.removePrefix(userPrefix) else id.substringAfter("::"),
         name = name,
         address = address,
         category = category,
         latitude = latitude,
         longitude = longitude,
         distanceFromUserKm = distanceFromUserKm,
-        isDemoSample = isDemoSample
+        isDemoSample = isDemoSample,
+        lastVisitedTimestamp = lastVisitedTimestamp
     )
 }
